@@ -1,0 +1,41 @@
+{
+  "name": "grok-plugin-codex",
+  "version": "0.1.0",
+  "description": "Use Grok CLI from Codex for bounded runs, reviews, rescue analysis, sessions, exports, and background jobs.",
+  "author": {
+    "name": "handong66",
+    "url": "https://github.com/handong66"
+  },
+  "homepage": "https://github.com/handong66/grok-plugin-codex",
+  "repository": "https://github.com/handong66/grok-plugin-codex",
+  "license": "MIT",
+  "keywords": [
+    "grok",
+    "xai",
+    "codex",
+    "mcp",
+    "agent"
+  ],
+  "skills": "./skills/",
+  "mcpServers": "./.mcp.json",
+  "interface": {
+    "displayName": "Grok for Codex",
+    "shortDescription": "Run Grok CLI from Codex",
+    "longDescription": "Call Grok from Codex for bounded runs, reviews, rescue analysis, adversarial review, session listing/export, and background job management without hidden Codex context transfer.",
+    "developerName": "handong66",
+    "category": "Developer Tools",
+    "capabilities": [
+      "Interactive",
+      "Write"
+    ],
+    "websiteURL": "https://github.com/handong66/grok-plugin-codex",
+    "privacyPolicyURL": "https://github.com/handong66/grok-plugin-codex/blob/main/docs/privacy.md",
+    "termsOfServiceURL": "https://github.com/handong66/grok-plugin-codex/blob/main/docs/terms.md",
+    "defaultPrompt": [
+      "Use Grok to review the current diff.",
+      "Ask Grok for rescue analysis.",
+      "Run Grok on this repo task."
+    ],
+    "brandColor": "#111827"
+  }
+}

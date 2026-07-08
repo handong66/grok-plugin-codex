@@ -1,0 +1,18 @@
+{
+  "mcpServers": {
+    "grok-plugin-codex": {
+      "title": "Grok for Codex",
+      "description": "Run Grok CLI from Codex for bounded runs, reviews, sessions, exports, and background jobs.",
+      "cwd": ".",
+      "command": "node",
+      "args": [
+        "./dist/server.js"
+      ],
+      "env_vars": [
+        "GROK_BIN",
+        "HOME",
+        "PATH"
+      ]
+    }
+  }
+}
