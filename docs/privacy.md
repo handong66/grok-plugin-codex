@@ -1,27 +1,35 @@
 # Privacy Policy
 
-Effective date: July 8, 2026
+Effective date: July 10, 2026
 
-`grok-plugin-codex` is a local Codex plugin. It does not run a hosted service operated by this project, and this project does not collect telemetry, analytics, account data, or payment data.
+`grok-plugin-codex` is a local Codex plugin. This project operates no hosted service and collects no telemetry, analytics, account data, or payment data.
 
-## What Runs Locally
+## What runs locally
 
-The plugin starts a local Node.js MCP server and calls the Grok CLI installed on the user's machine. Tool inputs, prompts, selected working directories, command output, and background job metadata stay in the user's local environment unless the local Grok CLI or the user sends them elsewhere.
+The plugin starts a local Node.js MCP server. Foreground and background requests both use a detached local worker so execution and cleanup can survive MCP-server exit. The Grok CLI may send prompt and workspace-derived content to Grok/xAI according to the user's CLI configuration and xAI terms. This project does not control that processing.
 
-## Data Sent To Grok
+## Prompt handling
 
-When a user runs a Grok tool, the plugin passes the user-provided prompt or wrapper prompt to the local Grok CLI. The Grok CLI may send that content to Grok/xAI services according to the user's Grok CLI configuration and xAI terms. This project does not control xAI's processing.
+Prompt text is staged briefly in a private `0600` file so the detached worker can acquire it. The worker reads and removes that file before starting Grok, then sends the prompt through inherited file descriptor 3 with `--prompt-file /dev/fd/3`. Prompt text is not placed in process arguments or persisted job arguments. A crash before worker acquisition is reconciled by job status/result or the next opportunistic cleanup.
 
-Users should not paste secrets, credentials, private tool output, or sensitive files into prompts. The plugin does not redact arbitrary user-provided prompt text.
+The plugin cannot redact arbitrary text intentionally supplied in `prompt`, `problem`, or `target`. Do not send secrets, credentials, private tool output, or sensitive file contents.
 
-## Local Logs
+## Background state
 
-Background jobs write local job records and stdout/stderr logs under `.grok-plugin-codex/jobs` inside the selected working directory. These paths are ignored by this repository's git and npm packaging rules, but users are responsible for their own workspaces.
+Background state lives under `$GROK_PLUGIN_STATE_DIR`, otherwise `$XDG_STATE_HOME/grok-plugin-codex`, otherwise `~/.local/state/grok-plugin-codex`. A configured override that overlaps any active workspace root in either direction is rejected before directories are created or permissions changed. An existing override must be empty, carry the plugin ownership marker, or match the strict private pre-marker job layout, preventing accidental `chmod` or job creation in a shared directory. Directories use `0700`; job records, logs, heartbeats, cancellation markers, cross-process locks, prompt staging files, and the ownership marker use `0600`. Records are written atomically and terminal status cannot be overwritten by a late worker.
+
+Private job records can contain the selected workspace path, Grok executable path, non-prompt CLI arguments, timestamps, process identifiers, a random process-group ownership token, and typed error metadata. Public MCP results remove command paths, internal arguments, PIDs, ownership tokens, and state-file paths; unexpected internal errors use a stable sanitized message. Raw stdout/stderr tails may still contain content produced by Grok.
+
+Terminal artifacts are retained for seven days and cleaned opportunistically. Version 0.2 does not scan or remove legacy workspace-local state created by 0.1.
 
 ## Environment
 
-Grok child processes receive only the plugin-declared environment allowlist: `GROK_BIN`, `HOME`, and `PATH`.
+Grok child processes receive only documented variables needed for executable discovery and common network configuration: `GROK_BIN`, `HOME`, `PATH`, proxy variables, `SSL_CERT_FILE`, `SSL_CERT_DIR`, and `NODE_EXTRA_CA_CERTS`. Worker state paths and job ownership tokens are not passed to Grok; the token identifies the private local launcher instead.
+
+## Codex boundary
+
+The plugin does not automatically copy hidden Codex context, system/developer messages, reasoning, credentials, or arbitrary tool output into Grok prompts. Private Codex paths such as `~/.codex` are blocked by default.
 
 ## Contact
 
-For privacy or security concerns, use GitHub security advisories for this repository when available. Do not include secrets in public issues.
+Use GitHub security advisories for sensitive privacy or security reports when available. Never include secrets in public issues.

@@ -1,24 +1,10 @@
 #!/usr/bin/env node
 import { Client } from "@modelcontextprotocol/sdk/client/index.js";
 import { StdioClientTransport } from "@modelcontextprotocol/sdk/client/stdio.js";
+import { ListRootsRequestSchema } from "@modelcontextprotocol/sdk/types.js";
+import { pathToFileURL } from "node:url";
 
 const sentinel = "GROK_PLUGIN_CODEX_OK";
-
-function extractJsonObject(text) {
-  const starts = [];
-  for (let index = 0; index < text.length; index += 1) {
-    if (text[index] === "{") starts.push(index);
-  }
-  for (const index of starts.reverse()) {
-    const candidate = text.slice(index).trim();
-    try {
-      return JSON.parse(candidate);
-    } catch {
-      continue;
-    }
-  }
-  return undefined;
-}
 
 const transport = new StdioClientTransport({
   command: "node",
@@ -33,7 +19,13 @@ transport.stderr?.on("data", (chunk) => {
   stderr += chunk.toString();
 });
 
-const client = new Client({ name: "grok-plugin-codex-live-smoke", version: "0.1.0" });
+const client = new Client(
+  { name: "grok-plugin-codex-live-smoke", version: "0.2.0" },
+  { capabilities: { roots: {} } }
+);
+client.setRequestHandler(ListRootsRequestSchema, async () => ({
+  roots: [{ uri: pathToFileURL(process.cwd()).href, name: "live-smoke-workspace" }]
+}));
 
 try {
   await client.connect(transport);
@@ -41,8 +33,9 @@ try {
     {
       name: "grok_run",
       arguments: {
+        cwd: process.cwd(),
         prompt: `Reply with exactly: ${sentinel}`,
-        model: "grok-composer-2.5-fast",
+        ...(process.env.GROK_SMOKE_MODEL ? { model: process.env.GROK_SMOKE_MODEL } : {}),
         disableWebSearch: true,
         noSubagents: true,
         maxTurns: 1,
@@ -53,11 +46,13 @@ try {
     undefined,
     { timeout: 130_000 }
   );
-  if (result.isError) throw new Error(`grok_run returned MCP error: ${JSON.stringify(result)}`);
   const wrapper = JSON.parse(result.content?.[0]?.text ?? "{}");
-  if (!wrapper.ok) throw new Error(`grok_run failed: ${JSON.stringify(wrapper, null, 2)}`);
-  const grokJson = extractJsonObject(wrapper.stdout ?? "");
-  const text = grokJson?.text ?? wrapper.stdout ?? "";
+  if (result.isError || !wrapper.ok) {
+    throw new Error(
+      `grok_run failed [${wrapper.error?.code ?? "unknown"}]: ${wrapper.error?.message ?? "No structured error message."}`
+    );
+  }
+  const text = wrapper.data?.finalText ?? "";
   if (String(text).trim() !== sentinel) {
     throw new Error(`Expected exact ${sentinel}, got: ${String(text).trim()}`);
   }

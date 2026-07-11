@@ -1,15 +1,16 @@
 # Development
 
-## Repository Layout
+## Repository layout
 
-- Root package: Node/TypeScript build, tests, scripts, docs, license, and marketplace metadata.
-- Plugin package: `plugins/grok-plugin-codex`.
-- MCP server source: `plugins/grok-plugin-codex/src`.
-- Bundled server: `plugins/grok-plugin-codex/dist/server.js`.
-- Runtime job logs: `.grok-plugin-codex/jobs`, ignored by git and npm packaging.
-- OpenCode review cache: `.opencode-plugin-codex/`, ignored by git and npm packaging.
+- Root package: build, tests, release scripts, policy documents, and marketplace metadata.
+- Plugin archive: `plugins/grok-plugin-codex`.
+- MCP source: `plugins/grok-plugin-codex/src`.
+- Bundles: `plugins/grok-plugin-codex/dist/server.js` and `job-worker.js`.
+- Runtime state: private user state directory selected by `GROK_PLUGIN_STATE_DIR`, `XDG_STATE_HOME`, or `~/.local/state`.
 
-## Commands
+Runtime state must never be written into a user workspace.
+
+## Required commands
 
 ```bash
 npm install
@@ -22,49 +23,50 @@ npm run check
 git diff --check
 ```
 
-Optional authenticated live smoke:
+Optional authenticated invocation:
 
 ```bash
 npm run smoke:live-grok
 ```
 
-## Tool Governance
+## Contract ownership
 
-When changing tool behavior, update all of these together:
+- `src/server.ts` owns MCP names and input/output schemas.
+- `src/tools.ts` owns workspace validation, command construction, envelopes, and foreground polling behavior.
+- `src/job-store.ts` owns private state, owner-checked locks, atomic/monotonic persistence, process-group ownership verification, cancellation markers, cleanup, and public-job sanitization.
+- `src/job-worker.ts` owns foreground/background CLI process lifetime, heartbeat, timeout, tree termination, logs, and prompt handoff/cleanup.
+- `src/result-parser.ts` owns streaming finality.
+- `scripts/smoke-mcp.mjs` and `test/contract-drift.test.ts` lock the published contract.
+- Bundled README and skill files explain the installed contract; the root README is developer and release documentation.
 
-- `README.md`
-- `plugins/grok-plugin-codex/README.md`
-- `plugins/grok-plugin-codex/skills/grok/SKILL.md`
-- `plugins/grok-plugin-codex/src/tools.ts`
-- `plugins/grok-plugin-codex/src/job-store.ts`
-- `plugins/grok-plugin-codex/src/grok-cli.ts`
-- `plugins/grok-plugin-codex/src/server.ts`
-- `scripts/smoke-mcp.mjs`
-- Relevant tests under `test/`
+Adding, removing, or renaming a tool or argument must change the source schema and its contract test in the same patch. Dong-skills orchestration documentation must not duplicate the low-level schema.
 
-## Command Construction Rules
+## Command rules
 
-- Foreground runs use `--output-format json`.
-- Background runs use `--output-format streaming-json`.
-- Prompts are passed with `-p <prompt>` and are never treated as file paths.
-- `alwaysApprove` is only passed when explicitly true.
-- `continueLatest` must be explicit before using `--continue`.
-- `reasoningEffort` is not passed for `grok-composer-2.5-fast` or when the model is omitted.
+- Foreground and background prompts both use `streaming-json`; the worker removes the staging file before passing the prompt through native `--prompt-file /dev/fd/3`.
+- Prompt text never appears in persisted job arguments or process argv.
+- Inherited prompt delivery must reach fd3 `finish`; premature close is a typed failure even if Grok prints a syntactically complete response.
+- Read-only review/rescue tools force `--permission-mode plan` and `--no-subagents`.
+- Mutable runs pass `--always-approve` only when explicitly requested.
+- Continuation requires `sessionId` or explicit `continueLatest: true`.
+- Discovery uses trusted `GROK_BIN`; there is no per-call executable path.
+- Required safety flags are capability-probed from the installed `grok --help` and fail closed when absent.
+- Process-tree lifecycle is supported on macOS and Linux; package metadata and runtime checks reject other platforms.
 
-## Background Output Contract
+## Background finality
 
-Grok streaming output can include non-JSON warning/log lines. The parser skips those lines and reads JSON events shaped like:
+Streaming lines may contain non-JSON diagnostics. The parser accepts JSON events, collects complete text, recognizes structured error events, and requires:
 
-```json
-{"type":"thought","data":"..."}
-{"type":"text","data":"..."}
-{"type":"end","stopReason":"EndTurn","sessionId":"...","requestId":"..."}
-```
+1. process status `succeeded`;
+2. non-empty text;
+3. an `end` event;
+4. no structured stream error;
+5. no output truncation.
 
-A background job is complete only when:
+Only then is `resultComplete` true. Codex still verifies the result against real workspace files.
 
-1. The process status is `succeeded`.
-2. At least one `text` event exists.
-3. An `end` event exists.
+## Local upgrade loop
 
-Codex must still verify Grok's result against the workspace before acting on it.
+Codex caches local plugins by manifest version. During local iteration, update the manifest cachebuster with the `plugin-creator` helper when available, keep that single `+codex.<cachebuster>` suffix in the source manifest while the local marketplace points at the working repository, reinstall from the confirmed local marketplace, and start a new Codex task. The package and MCP server continue to advertise the base release version. Do not hand-edit Codex cache contents.
+
+Codex Desktop may retain its process-level MCP registry after a reinstall even when a newly created task can already see the updated skill. If `codex mcp list` shows the new enabled server but a new Desktop task cannot discover its tools, restart Codex Desktop and create another task before diagnosing the plugin server. A genuinely fresh Codex CLI process is a useful read-only control.

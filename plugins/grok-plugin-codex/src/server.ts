@@ -1,8 +1,11 @@
 #!/usr/bin/env node
 import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { StdioServerTransport } from "@modelcontextprotocol/sdk/server/stdio.js";
+import { isAbsolute } from "node:path";
+import { fileURLToPath } from "node:url";
 import { z } from "zod";
 import {
+  configureWorkspaceRootsProvider,
   grokAdversarialReview,
   grokCancel,
   grokCheck,
@@ -16,187 +19,197 @@ import {
   grokSessions,
   grokStatus
 } from "./tools.js";
-import { JOB_ID_PATTERN } from "./job-store.js";
 
 const server = new McpServer(
-  {
-    name: "grok-plugin-codex",
-    version: "0.1.0"
-  },
+  { name: "grok-plugin-codex", version: "0.2.0" },
   {
     instructions:
-      "Use these tools to call Grok CLI from Codex. Do not transfer hidden Codex context, secrets, tool outputs, system/developer messages, or private runtime paths unless the user explicitly authorizes that risk."
+      "Use these tools to operate Grok CLI without transferring hidden Codex context, secrets, system/developer messages, tool output, or private runtime paths. Codex owns scope, verification, git, and final judgment."
   }
 );
 
-const commonShape = {
-  cwd: z.string().optional().describe("Working directory for Grok. Defaults to the MCP server cwd."),
-  grokBin: z
-    .string()
-    .optional()
-    .describe("Explicit Grok binary path. Defaults to GROK_BIN, ~/.grok/bin/grok, ~/.local/bin/grok, Homebrew paths, then PATH."),
-  model: z.string().optional().describe("Grok model ID to pass with -m/--model."),
-  timeoutMs: z.number().int().positive().optional(),
-  background: z.boolean().optional().describe("Run as a background job using --output-format streaming-json."),
-  disableWebSearch: z.boolean().optional().describe("Pass --disable-web-search."),
-  noSubagents: z.boolean().optional().describe("Pass --no-subagents."),
-  maxTurns: z.number().int().positive().optional().describe("Pass --max-turns."),
-  alwaysApprove: z.boolean().optional().describe("Pass --always-approve only when explicitly true."),
-  reasoningEffort: z
-    .string()
-    .optional()
-    .describe("Pass --reasoning-effort only for non-default models where the plugin does not know it is unsupported."),
-  allowCodexPrivatePaths: z
-    .boolean()
-    .optional()
-    .describe("Allow prompts that mention Codex private runtime paths such as ~/.codex. Default false.")
+configureWorkspaceRootsProvider(async () => {
+  return await server.server
+    .listRoots()
+    .then(({ roots }) =>
+      roots.flatMap((root) => {
+        const url = new URL(root.uri);
+        return url.protocol === "file:" ? [fileURLToPath(url)] : [];
+      })
+    )
+    .catch(() => []);
+});
+
+function codexWorkspaceRoots(meta: unknown): string[] {
+  if (!meta || typeof meta !== "object" || Array.isArray(meta)) return [];
+  const turnMetadata = (meta as Record<string, unknown>)["x-codex-turn-metadata"];
+  if (!turnMetadata || typeof turnMetadata !== "object" || Array.isArray(turnMetadata)) return [];
+  const workspaces = (turnMetadata as Record<string, unknown>).workspaces;
+  if (!workspaces || typeof workspaces !== "object" || Array.isArray(workspaces)) return [];
+  return Object.keys(workspaces).filter((root) => root.length <= 4_096 && isAbsolute(root));
+}
+
+function withCodexWorkspaceRoots<T extends Record<string, unknown>>(
+  args: T,
+  meta: unknown
+): T & { _workspaceRoots: string[] } {
+  return { ...args, _workspaceRoots: codexWorkspaceRoots(meta) };
+}
+
+const errorSchema = z.object({
+  code: z.string(),
+  message: z.string(),
+  retryable: z.boolean(),
+  details: z.record(z.string(), z.unknown()).optional()
+});
+const outputSchema = {
+  ok: z.boolean(),
+  data: z.record(z.string(), z.unknown()).nullable(),
+  error: errorSchema.nullable(),
+  warnings: z.array(z.string())
 };
 
-const discoveryShape = {
-  cwd: commonShape.cwd,
-  grokBin: commonShape.grokBin,
-  timeoutMs: commonShape.timeoutMs
+const cwdRequired = z.string().trim().min(1).max(4_096).describe("Existing working directory inside an active MCP workspace root.");
+const cwdOptional = z.string().trim().min(1).max(4_096).optional();
+const timeoutSchema = z.number().int().positive().max(86_400_000).optional();
+const jobIdSchema = z.string().min(20).max(132).regex(/^job_[A-Za-z0-9_-]+$/);
+
+const executionShape = {
+  cwd: cwdRequired,
+  model: z.string().trim().min(1).max(512).optional(),
+  timeoutMs: timeoutSchema,
+  background: z.boolean().optional(),
+  disableWebSearch: z.boolean().optional(),
+  maxTurns: z.number().int().positive().max(10_000).optional(),
+  reasoningEffort: z.string().trim().min(1).max(128).optional(),
+  allowCodexPrivatePaths: z.boolean().optional()
 };
 
-const runtimeCommonShape = {
-  ...discoveryShape,
-  includeModels: z.boolean().optional().describe("Set false to skip authenticated grok models probing and only check CLI discovery/version.")
+const mutableExecutionShape = {
+  ...executionShape,
+  noSubagents: z.boolean().optional(),
+  alwaysApprove: z.boolean().optional()
 };
-
-const jobIdShape = z.string().regex(JOB_ID_PATTERN).describe("Background job ID returned by a Grok background tool run.");
 
 server.registerTool(
   "grok_check",
   {
     title: "Check Grok",
-    description: "Discover Grok CLI, run grok --version, and detect login/model availability with grok models.",
-    inputSchema: runtimeCommonShape
+    description: "Separate Grok CLI discovery, capability compatibility, authentication/model listing, and actual model-call evidence.",
+    inputSchema: { cwd: cwdOptional, includeModels: z.boolean().optional(), timeoutMs: timeoutSchema },
+    outputSchema
   },
-  grokCheck
+  (args, extra) => grokCheck(withCodexWorkspaceRoots(args, extra._meta))
 );
 
 server.registerTool(
   "grok_models",
   {
     title: "List Grok Models",
-    description: "Return raw and parsed grok models output.",
-    inputSchema: discoveryShape
+    description: "List models without claiming that any model has completed a real invocation.",
+    inputSchema: { cwd: cwdOptional, timeoutMs: timeoutSchema },
+    outputSchema
   },
-  grokModels
+  (args, extra) => grokModels(withCodexWorkspaceRoots(args, extra._meta))
 );
 
 server.registerTool(
   "grok_run",
   {
     title: "Run Grok",
-    description: "Run a Grok prompt in foreground JSON mode or background streaming-json mode.",
+    description: "Run one explicit Grok prompt in the named workspace.",
     inputSchema: {
-      ...commonShape,
-      prompt: z
-        .string()
-        .describe(
-          "Prompt to send to Grok. Put task text here; do not ask Grok to read Codex private runtime paths such as ~/.codex unless explicitly authorized."
-        )
-    }
+      ...mutableExecutionShape,
+      prompt: z.string().min(1).max(250_000)
+    },
+    outputSchema
   },
-  grokRun
+  (args, extra) => grokRun(withCodexWorkspaceRoots(args, extra._meta))
 );
 
 server.registerTool(
   "grok_continue",
   {
     title: "Continue Grok Session",
-    description: "Continue a Grok session with --resume <sessionId> or, only when explicitly requested, --continue.",
+    description: "Continue a known Grok session or explicitly continue the latest session.",
     inputSchema: {
-      ...commonShape,
-      sessionId: z.string().optional(),
+      ...mutableExecutionShape,
+      sessionId: z.string().trim().min(1).max(256).optional(),
       continueLatest: z.boolean().optional(),
-      prompt: z.string().describe("Prompt to send while continuing the Grok session.")
-    }
+      prompt: z.string().min(1).max(250_000)
+    },
+    outputSchema
   },
-  grokContinue
+  (args, extra) => grokContinue(withCodexWorkspaceRoots(args, extra._meta))
 );
 
 server.registerTool(
   "grok_rescue",
   {
     title: "Grok Rescue",
-    description: "Ask Grok for an independent read-only diagnosis and minimal path forward.",
-    inputSchema: {
-      ...commonShape,
-      problem: z.string().describe("Problem statement and visible context to diagnose.")
-    }
+    description: "Ask Grok for an independent, enforced read-only diagnosis.",
+    inputSchema: { ...executionShape, problem: z.string().min(1).max(250_000) },
+    outputSchema
   },
-  grokRescue
+  (args, extra) => grokRescue(withCodexWorkspaceRoots(args, extra._meta))
 );
 
 server.registerTool(
   "grok_review",
   {
     title: "Grok Review",
-    description: "Ask Grok for a bounded findings-first review of a target such as the current diff.",
-    inputSchema: {
-      ...commonShape,
-      target: z.string().optional().describe("Review target. Defaults to current working tree.")
-    }
+    description: "Run an enforced read-only review of one explicit target.",
+    inputSchema: { ...executionShape, target: z.string().trim().min(1).max(16_384) },
+    outputSchema
   },
-  grokReview
+  (args, extra) => grokReview(withCodexWorkspaceRoots(args, extra._meta))
 );
 
 server.registerTool(
   "grok_adversarial_review",
   {
     title: "Grok Adversarial Review",
-    description: "Ask Grok for a bounded failure-mode review with at most 5 findings.",
-    inputSchema: {
-      ...commonShape,
-      target: z.string().optional().describe("Review target. Defaults to current working tree.")
-    }
+    description: "Run an enforced read-only failure-mode review of one explicit target.",
+    inputSchema: { ...executionShape, target: z.string().trim().min(1).max(16_384) },
+    outputSchema
   },
-  grokAdversarialReview
+  (args, extra) => grokAdversarialReview(withCodexWorkspaceRoots(args, extra._meta))
 );
 
 server.registerTool(
   "grok_sessions",
   {
     title: "Grok Sessions",
-    description: "Wrap grok sessions list/search and return raw output.",
+    description: "List or search Grok sessions for an explicit workspace.",
     inputSchema: {
-      cwd: commonShape.cwd,
-      grokBin: commonShape.grokBin,
-      timeoutMs: commonShape.timeoutMs,
-      query: z.string().optional(),
-      limit: z.number().int().positive().optional()
-    }
+      cwd: cwdRequired,
+      timeoutMs: timeoutSchema,
+      query: z.string().max(4_096).optional(),
+      limit: z.number().int().positive().max(1_000).optional()
+    },
+    outputSchema
   },
-  grokSessions
+  (args, extra) => grokSessions(withCodexWorkspaceRoots(args, extra._meta))
 );
 
 server.registerTool(
   "grok_export",
   {
     title: "Export Grok Session",
-    description: "Wrap grok export <sessionId> and return Markdown from stdout by default.",
-    inputSchema: {
-      cwd: commonShape.cwd,
-      grokBin: commonShape.grokBin,
-      timeoutMs: commonShape.timeoutMs,
-      sessionId: z.string(),
-      outputFile: z.string().optional().describe("Optional filesystem output path. Omit to return Markdown.")
-    }
+    description: "Return a Grok session transcript as Markdown without writing a caller-selected file.",
+    inputSchema: { cwd: cwdRequired, timeoutMs: timeoutSchema, sessionId: z.string().trim().min(1).max(256) },
+    outputSchema
   },
-  grokExport
+  (args, extra) => grokExport(withCodexWorkspaceRoots(args, extra._meta))
 );
 
 server.registerTool(
   "grok_status",
   {
     title: "Grok Job Status",
-    description: "Read a background Grok job record.",
-    inputSchema: {
-      cwd: z.string().optional(),
-      jobId: jobIdShape
-    }
+    description: "Read a background Grok job from the private central state store.",
+    inputSchema: { jobId: jobIdSchema },
+    outputSchema
   },
   grokStatus
 );
@@ -205,12 +218,9 @@ server.registerTool(
   "grok_result",
   {
     title: "Grok Job Result",
-    description: "Read stdout/stderr tails and parsed outputSummary for a background Grok job.",
-    inputSchema: {
-      cwd: z.string().optional(),
-      jobId: jobIdShape,
-      maxChars: z.number().int().positive().optional()
-    }
+    description: "Return bounded logs plus full captured final text; only resultComplete=true is final.",
+    inputSchema: { jobId: jobIdSchema, maxChars: z.number().int().positive().max(100_000).optional() },
+    outputSchema
   },
   grokResult
 );
@@ -219,14 +229,11 @@ server.registerTool(
   "grok_cancel",
   {
     title: "Cancel Grok Job",
-    description: "Cancel a running background Grok job.",
-    inputSchema: {
-      cwd: z.string().optional(),
-      jobId: jobIdShape
-    }
+    description: "Cancel a background Grok job and its process tree by job ID.",
+    inputSchema: { jobId: jobIdSchema },
+    outputSchema
   },
   grokCancel
 );
 
-const transport = new StdioServerTransport();
-await server.connect(transport);
+await server.connect(new StdioServerTransport());

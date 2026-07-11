@@ -1,43 +1,30 @@
 # Grok Plugin Codex
 
-`grok-plugin-codex` is a Codex plugin that exposes the local Grok CLI through a bundled Node/TypeScript stdio MCP server.
+`grok-plugin-codex` exposes a locally installed Grok CLI to Codex through a bundled Node/TypeScript MCP server. Codex remains responsible for scope, workspace state, verification, git, and final judgment; Grok is a bounded second surface.
 
-It lets Codex ask Grok for bounded repo work, reviews, rescue analysis, adversarial failure-mode checks, session listing/export, and background job management while keeping Codex hidden runtime context out of scope.
+Version `0.2.0` is a breaking contract release. It replaces workspace-local background state with a private central worker architecture, removes caller-selected executable and export paths, requires explicit review targets, and returns typed MCP envelopes.
 
 Repository: https://github.com/handong66/grok-plugin-codex
-
-## Tools
-
-- `grok_check`: discover Grok CLI, run `grok --version`, and check login/model availability with `grok models`. `ok: true` means both CLI discovery and `grok models` succeeded.
-- `grok_models`: return raw and parsed `grok models` output.
-- `grok_run`: run `grok --cwd <cwd> -p <prompt> --output-format json` in foreground or `streaming-json` in background.
-- `grok_continue`: continue with `--resume <sessionId>` or with `--continue` only when `continueLatest: true`.
-- `grok_rescue`: read-only independent diagnosis prompt wrapper.
-- `grok_review`: bounded findings-first review prompt wrapper.
-- `grok_adversarial_review`: bounded failure-mode review prompt wrapper that asks Grok for at most 5 findings. The cap is prompt-level guidance, not output truncation.
-- `grok_sessions`: wrap `grok sessions list/search`.
-- `grok_export`: wrap `grok export <sessionId>` and return Markdown from stdout by default.
-- `grok_status`, `grok_result`, `grok_cancel`: manage background Grok jobs.
-
-There is no `grok_transfer` tool in v1. Grok has `import`, but this repository does not claim a verified Codex rollout JSONL to Grok import schema.
 
 ## Requirements
 
 - Node.js `>=22`
 - npm
+- macOS or Linux
 - Codex local plugin marketplace support
-- Grok CLI installed and logged in
+- Grok CLI installed and authenticated
 
-Check Grok directly:
+Check the three runtime layers separately:
 
 ```bash
-grok --version
-grok models
+grok --version   # CLI can be discovered
+grok --help      # installed flags/capabilities
+grok models      # authentication and model listing
 ```
 
-## Install
+A listed model has not necessarily completed a real invocation. `grok_check` preserves that distinction.
 
-From the repository root:
+## Install
 
 ```bash
 npm install
@@ -46,63 +33,83 @@ codex plugin marketplace add .
 codex plugin add grok-plugin-codex --marketplace grok-plugin-codex
 ```
 
-Then start a new Codex thread so the MCP tools and `grok` skill are loaded.
+Start a new Codex task after installation or upgrade. Existing tasks retain the MCP server and skill snapshot with which they started. If a new Codex Desktop task sees the updated skill but not the updated MCP tools, restart Codex Desktop and create another task; the Desktop process can retain its MCP registry across reinstall.
 
-`npm run check` builds `plugins/grok-plugin-codex/dist/server.js`; the installed MCP server runs that bundle from the plugin directory.
-
-## Usage Notes
-
-Use the Grok tools as a second-agent surface. Codex remains responsible for scope, workspace state, verification, git, and final judgment.
-
-Pass `cwd` whenever Grok should inspect a specific workspace. If `cwd` is omitted, the plugin falls back to the MCP server process directory, which is normally the installed plugin directory rather than the user's active repo.
-
-For long tasks, pass `background: true` to use `--output-format streaming-json`, then poll:
+The installed bundle contains both:
 
 ```text
-grok_status -> grok_result -> grok_cancel if needed
+plugins/grok-plugin-codex/dist/server.js
+plugins/grok-plugin-codex/dist/job-worker.js
 ```
 
-Use the same `cwd` when polling or cancelling a background job that was used when the job was started; job records live under `<cwd>/.grok-plugin-codex/jobs`.
+## Capability surface
 
-`grok_result` treats a background job as complete only when the process succeeded, at least one `text` event was observed, and an `end` event was observed. Partial logs are process evidence, not a finished review.
+- `grok_check`, `grok_models`: CLI/capability and model diagnostics.
+- `grok_run`, `grok_continue`: explicit prompt execution and known-session continuation.
+- `grok_rescue`, `grok_review`, `grok_adversarial_review`: enforced read-only, no-subagent second passes. Review tools require an explicit `target`.
+- `grok_sessions`, `grok_export`: explicit-workspace session inspection and Markdown export.
+- `grok_status`, `grok_result`, `grok_cancel`: private central background-job lifecycle by `jobId` only.
 
-Use very low `maxTurns` values only for sentinel checks or prompts that do not need file/tool work. Repo reviews and rescue analysis usually need enough turns for Grok to inspect the requested files and produce a final answer.
+The current MCP `listTools` schema is authoritative for exact arguments. The repository smoke test locks the published surface and rejects drift.
 
-## Shared Arguments
+## Result contract
 
-Run, continue, rescue, review, and adversarial-review tools accept:
+Successful operations return:
 
-- `cwd`
-- `grokBin`
-- `model`
-- `timeoutMs`
-- `background`
-- `disableWebSearch`
-- `noSubagents`
-- `maxTurns`
-- `alwaysApprove`
-- `reasoningEffort`
-- `allowCodexPrivatePaths`
+```json
+{ "ok": true, "data": {}, "error": null, "warnings": [] }
+```
 
-`grok_check` accepts `cwd`, `grokBin`, `timeoutMs`, and optional `includeModels`. `grok_models` accepts `cwd`, `grokBin`, and `timeoutMs`.
+Business failures set MCP `isError: true` and return:
 
-`grok_sessions` accepts `cwd`, `grokBin`, `timeoutMs`, `query`, and `limit`. Search queries are separated from Grok CLI flags before execution. `grok_export` accepts `cwd`, `grokBin`, `timeoutMs`, `sessionId`, and optional `outputFile`; `outputFile` must resolve inside `cwd`. Discovery-style subcommands pass `cwd` as Grok's global `--cwd` option. Job tools accept `cwd` plus a `jobId` in the generated `job_<timestamp>_<8-hex>` format; `grok_result` also accepts `maxChars`.
+```json
+{
+  "ok": false,
+  "data": null,
+  "error": { "code": "typed_code", "message": "actionable message", "retryable": false },
+  "warnings": []
+}
+```
 
-`grok_check` also accepts `includeModels: false` to skip `grok models` and verify only CLI discovery/version. With the default behavior, `grok_check` runs `grok models` and `ok: true` means both discovery and model probing succeeded.
+Input schema violations are SDK-generated tool errors (`isError: true`) without the plugin business envelope; clients must inspect the resolved tool result rather than relying only on promise rejection. Every tool publishes an output schema, and plugin-handled JSON text mirrors `structuredContent`.
 
-`alwaysApprove` defaults to false and is only passed when explicitly true.
+## Workspace and prompt boundaries
 
-`reasoningEffort` is passed through only when the plugin does not know it is unsupported. The local default model `grok-composer-2.5-fast` does not support `--reasoning-effort`; the plugin warns and does not pass that flag for that model. If no model is specified, the plugin also warns and does not pass `--reasoning-effort`, because the local default may be `grok-composer-2.5-fast`.
+Workspace operations require `cwd`. The server canonicalizes symlinks and requires the resolved directory to remain inside an active MCP workspace root. Private Codex paths such as `~/.codex` are blocked unless the user explicitly authorizes that risk.
 
-## Privacy Boundary
+Prompts are staged briefly in private `0600` files so a detached worker can survive MCP-server exit. The worker reads and deletes the staging file before Grok runs, then supplies the prompt through file descriptor 3 with Grok's native `--prompt-file /dev/fd/3`. Prompt text is not placed in the child-process argument list or job record. `GROK_BIN` is the only supported custom executable configuration and must come from the trusted MCP environment.
 
-This plugin does not copy Codex hidden context, system/developer messages, tool outputs, hidden reasoning, secrets, or Grok auth tokens into prompts.
+## Background jobs
 
-Grok CLI child processes receive only the plugin-declared environment allowlist: `GROK_BIN`, `HOME`, and `PATH`.
+Background jobs run in a detached worker and survive MCP-server restarts. State lives under:
 
-Prompts that ask Grok to read Codex private runtime paths such as `~/.codex` are rejected by default. Set `allowCodexPrivatePaths: true` only when the user explicitly asks for that risk and understands it.
+1. `$GROK_PLUGIN_STATE_DIR`, when explicitly configured;
+2. `$XDG_STATE_HOME/grok-plugin-codex`;
+3. `~/.local/state/grok-plugin-codex`.
 
-This boundary does not redact arbitrary user-provided text. If a caller pastes secrets, private tool output, or sensitive file contents into `prompt`, `problem`, or `target`, that text is passed to Grok.
+An explicit state directory must be disjoint from every active workspace root: neither inside a root nor an ancestor of one. It must be empty, carry the plugin's ownership marker, or match the strict private pre-marker job layout; the plugin will not claim or `chmod` an existing shared directory. These checks fail closed before creating or changing repository-local state.
+
+Directories use `0700`; records, logs, prompt staging files, cancel markers, heartbeats, and owner-token cross-process locks use `0600`. Record writes are atomic and terminal status is monotonic. Cancellation is linearized by a marker consumed by the owning worker. Each process group is led by a private launcher whose command identity includes the job ID and random job token; stale-worker reconciliation terminates a persisted group only when all three match, and the launcher removes residual descendants before exiting.
+
+Start with `background: true`, save `data.job.id`, then call job tools with `jobId`. Only this combination is final:
+
+```text
+data.resultComplete === true
+data.outputTruncated === false
+```
+
+Use `data.finalText`. Raw tails and partial states are diagnostics only. Terminal job artifacts are retained for seven days and cleaned opportunistically.
+
+## Upgrading from 0.1
+
+- Finish or cancel 0.1 background jobs before upgrading.
+- 0.2 does not scan or trust old `<workspace>/.grok-plugin-codex/jobs` records.
+- Old workspace directories are not automatically removed because they belong to the user's workspace.
+- Per-call executable selection, caller-selected export files, implicit review targets, and job-control `cwd` are removed.
+
+## Privacy boundary
+
+The plugin does not copy hidden Codex context, system/developer messages, reasoning, arbitrary tool output, secrets, or credentials into prompts. It cannot redact sensitive text that a caller explicitly supplies. See [docs/privacy.md](docs/privacy.md).
 
 ## Development
 
@@ -112,24 +119,17 @@ npm run check
 git diff --check
 ```
 
-Optional authenticated live smoke:
+Optional authenticated invocation:
 
 ```bash
 npm run smoke:live-grok
 ```
 
-Keep these files aligned whenever tools change:
-
-- `README.md`
-- `plugins/grok-plugin-codex/README.md`
-- `plugins/grok-plugin-codex/skills/grok/SKILL.md`
-- `plugins/grok-plugin-codex/src/tools.ts`
-- `plugins/grok-plugin-codex/src/server.ts`
-- `scripts/smoke-mcp.mjs`
+Runtime schemas and tests are authoritative. Bundled README/skill files are the installed user contract; [test/contract-drift.test.ts](test/contract-drift.test.ts) and the MCP smoke prevent removed arguments or mismatched versions from reappearing.
 
 See [docs/development.md](docs/development.md) and [docs/verification.md](docs/verification.md).
 
-## Project Policies
+## Project policies
 
 - [Privacy Policy](docs/privacy.md)
 - [Terms of Use](docs/terms.md)

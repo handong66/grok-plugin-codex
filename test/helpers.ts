@@ -31,14 +31,30 @@ if [ "$1" = "--version" ]; then
   echo ${JSON.stringify(version)}
   exit 0
 fi
+if [ "$1" = "--help" ]; then
+  cat <<'HELP_EOF'
+--prompt-file <PATH>
+--output-format <plain|json|streaming-json>
+--permission-mode <default|plan>
+--no-subagents
+--disable-web-search
+--reasoning-effort <EFFORT>
+HELP_EOF
+  exit 0
+fi
 if { [ "$1" = "models" ]; } || { [ "$1" = "--cwd" ] && [ "$3" = "models" ]; }; then
   cat <<'MODELS_EOF'
 ${modelsOutput}
 MODELS_EOF
   exit 0
 fi
-for arg in "$@"; do
-  printf '%s\\n' "$arg"
-done
+case " $* " in
+  *" sessions "*|*" export "*)
+    for arg in "$@"; do printf '%s\\n' "$arg"; done
+    ;;
+  *)
+    printf '%s\\n' '{"type":"text","data":"OK"}' '{"type":"end","sessionId":"s1","requestId":"r1","stopReason":"EndTurn"}'
+    ;;
+esac
 `;
 }

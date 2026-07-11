@@ -1,6 +1,8 @@
 #!/usr/bin/env node
 import { existsSync } from "node:fs";
+import { mkdtemp, rm } from "node:fs/promises";
 import { homedir } from "node:os";
+import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { Client } from "@modelcontextprotocol/sdk/client/index.js";
 import { StdioClientTransport } from "@modelcontextprotocol/sdk/client/stdio.js";
@@ -20,15 +22,111 @@ const requiredTools = [
   "grok_cancel"
 ];
 
-const expectedProperties = {
-  grok_check: ["cwd", "grokBin", "includeModels", "timeoutMs"],
-  grok_models: ["cwd", "grokBin", "timeoutMs"]
-};
-
-const expectedPatterns = {
-  grok_status: { jobId: "^job_\\d+_[0-9a-f]{8}$" },
-  grok_result: { jobId: "^job_\\d+_[0-9a-f]{8}$" },
-  grok_cancel: { jobId: "^job_\\d+_[0-9a-f]{8}$" }
+const expectedSchemas = {
+  grok_check: {
+    properties: ["cwd", "includeModels", "timeoutMs"],
+    required: []
+  },
+  grok_models: {
+    properties: ["cwd", "timeoutMs"],
+    required: []
+  },
+  grok_run: {
+    properties: [
+      "allowCodexPrivatePaths",
+      "alwaysApprove",
+      "background",
+      "cwd",
+      "disableWebSearch",
+      "maxTurns",
+      "model",
+      "noSubagents",
+      "prompt",
+      "reasoningEffort",
+      "timeoutMs"
+    ],
+    required: ["cwd", "prompt"]
+  },
+  grok_continue: {
+    properties: [
+      "allowCodexPrivatePaths",
+      "alwaysApprove",
+      "background",
+      "continueLatest",
+      "cwd",
+      "disableWebSearch",
+      "maxTurns",
+      "model",
+      "noSubagents",
+      "prompt",
+      "reasoningEffort",
+      "sessionId",
+      "timeoutMs"
+    ],
+    required: ["cwd", "prompt"]
+  },
+  grok_rescue: {
+    properties: [
+      "allowCodexPrivatePaths",
+      "background",
+      "cwd",
+      "disableWebSearch",
+      "maxTurns",
+      "model",
+      "problem",
+      "reasoningEffort",
+      "timeoutMs"
+    ],
+    required: ["cwd", "problem"]
+  },
+  grok_review: {
+    properties: [
+      "allowCodexPrivatePaths",
+      "background",
+      "cwd",
+      "disableWebSearch",
+      "maxTurns",
+      "model",
+      "reasoningEffort",
+      "target",
+      "timeoutMs"
+    ],
+    required: ["cwd", "target"]
+  },
+  grok_adversarial_review: {
+    properties: [
+      "allowCodexPrivatePaths",
+      "background",
+      "cwd",
+      "disableWebSearch",
+      "maxTurns",
+      "model",
+      "reasoningEffort",
+      "target",
+      "timeoutMs"
+    ],
+    required: ["cwd", "target"]
+  },
+  grok_sessions: {
+    properties: ["cwd", "limit", "query", "timeoutMs"],
+    required: ["cwd"]
+  },
+  grok_export: {
+    properties: ["cwd", "sessionId", "timeoutMs"],
+    required: ["cwd", "sessionId"]
+  },
+  grok_status: {
+    properties: ["jobId"],
+    required: ["jobId"]
+  },
+  grok_result: {
+    properties: ["jobId", "maxChars"],
+    required: ["jobId"]
+  },
+  grok_cancel: {
+    properties: ["jobId"],
+    required: ["jobId"]
+  }
 };
 
 function localGrokCandidate() {
@@ -42,11 +140,12 @@ function localGrokCandidate() {
   return candidates.find((candidate) => existsSync(candidate));
 }
 
+const stateDir = await mkdtemp(join(tmpdir(), "grok-plugin-codex-smoke-state-"));
 const transport = new StdioClientTransport({
   command: "node",
   args: ["plugins/grok-plugin-codex/dist/server.js"],
   cwd: process.cwd(),
-  env: process.env,
+  env: { ...process.env, GROK_PLUGIN_STATE_DIR: stateDir },
   stderr: "pipe"
 });
 
@@ -55,7 +154,7 @@ transport.stderr?.on("data", (chunk) => {
   stderr += chunk.toString();
 });
 
-const client = new Client({ name: "grok-plugin-codex-smoke", version: "0.1.0" });
+const client = new Client({ name: "grok-plugin-codex-smoke", version: "0.2.0" });
 
 try {
   await client.connect(transport);
@@ -66,33 +165,60 @@ try {
     throw new Error(`Missing MCP tools: ${missing.join(", ")}`);
   }
 
-  for (const [toolName, expected] of Object.entries(expectedProperties)) {
+  for (const [toolName, expected] of Object.entries(expectedSchemas)) {
     const tool = tools.find((candidate) => candidate.name === toolName);
     const properties = Object.keys(tool?.inputSchema?.properties ?? {}).sort();
-    const sortedExpected = [...expected].sort();
+    const sortedExpected = [...expected.properties].sort();
     if (JSON.stringify(properties) !== JSON.stringify(sortedExpected)) {
       throw new Error(`Unexpected ${toolName} schema properties: ${properties.join(", ")}`);
     }
-  }
-
-  for (const [toolName, expected] of Object.entries(expectedPatterns)) {
-    const tool = tools.find((candidate) => candidate.name === toolName);
-    for (const [property, pattern] of Object.entries(expected)) {
-      const actual = tool?.inputSchema?.properties?.[property]?.pattern;
-      if (actual !== pattern) {
-        throw new Error(`Unexpected ${toolName}.${property} pattern: ${actual}`);
-      }
+    const required = [...(tool?.inputSchema?.required ?? [])].sort();
+    const sortedRequired = [...expected.required].sort();
+    if (JSON.stringify(required) !== JSON.stringify(sortedRequired)) {
+      throw new Error(`Unexpected ${toolName} required fields: ${required.join(", ")}`);
+    }
+    if (!tool?.outputSchema) {
+      throw new Error(`Missing ${toolName} output schema.`);
+    }
+    const outputProperties = Object.keys(tool.outputSchema.properties ?? {}).sort();
+    const expectedOutputProperties = ["data", "error", "ok", "warnings"];
+    if (tool.outputSchema.type !== "object" || JSON.stringify(outputProperties) !== JSON.stringify(expectedOutputProperties)) {
+      throw new Error(`Unexpected ${toolName} output schema shape: ${JSON.stringify(tool.outputSchema)}`);
+    }
+    const outputRequired = [...(tool.outputSchema.required ?? [])].sort();
+    if (JSON.stringify(outputRequired) !== JSON.stringify(expectedOutputProperties)) {
+      throw new Error(`Unexpected ${toolName} output required fields: ${outputRequired.join(", ")}`);
     }
   }
 
-  const grokBin = localGrokCandidate();
-  if (grokBin) {
+  const protocolError = await client.callTool(
+    { name: "grok_review", arguments: { cwd: process.cwd() } },
+    undefined,
+    { timeout: 5_000 }
+  );
+  if (!protocolError.isError || !String(protocolError.content?.[0]?.text ?? "").includes("Input validation error")) {
+    throw new Error(`Missing MCP input validation error for grok_review.target: ${JSON.stringify(protocolError)}`);
+  }
+
+  const businessError = await client.callTool(
+    { name: "grok_status", arguments: { jobId: "job_smokeunknown000000000000" } },
+    undefined,
+    { timeout: 5_000 }
+  );
+  const businessText = businessError.content?.[0]?.text ?? "";
+  const businessEnvelope = JSON.parse(businessText);
+  if (!businessError.isError || businessEnvelope.error?.code !== "job_not_found") {
+    throw new Error(`Missing typed job_not_found business error: ${businessText}`);
+  }
+  if (JSON.stringify(businessEnvelope) !== JSON.stringify(businessError.structuredContent)) {
+    throw new Error("Business error text does not mirror structuredContent.");
+  }
+
+  if (localGrokCandidate()) {
     const result = await client.callTool(
       {
         name: "grok_check",
-        arguments: {
-          grokBin
-        }
+        arguments: { includeModels: false }
       },
       undefined,
       { timeout: 30_000 }
@@ -106,5 +232,6 @@ try {
   console.log(`MCP smoke passed: ${names.length} tools available`);
 } finally {
   await client.close();
+  await rm(stateDir, { recursive: true, force: true });
   if (stderr.trim()) process.stderr.write(stderr);
 }

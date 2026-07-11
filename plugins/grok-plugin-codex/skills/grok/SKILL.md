@@ -1,43 +1,25 @@
 ---
 name: grok
-description: Use when the user asks Codex to call Grok, run Grok CLI, review with Grok, ask Grok for rescue analysis, inspect Grok sessions, or export a Grok session.
+description: Use when Codex must directly operate or troubleshoot the installed grok-plugin-codex MCP capability surface, including CLI/model checks, literal prompt runs or continuations, session inspection or export, and known background-job control. Do not use for bounded repository delegation, implementation, review, adversarial review, or rescue orchestration; use $grok-codex-collaboration.
 ---
 
-# Grok For Codex
+# Grok Capability Layer
 
-Use the bundled `grok_*` MCP tools to delegate bounded work from Codex to Grok CLI.
+Operate the installed `grok_*` tools according to their current schemas. Codex owns scope, workspace state, verification, git, and final judgment.
 
-## Default Workflow
+## Required contract
 
-1. Use `grok_check` first when Grok CLI, login, model availability, or path discovery may be uncertain.
-2. Use `grok_run` for a new Grok prompt.
-3. Use `grok_continue` only with a known `sessionId` or explicit `continueLatest: true`; never silently continue the latest session.
-4. Use `grok_review`, `grok_adversarial_review`, or `grok_rescue` for second-agent analysis.
-5. Use `grok_sessions` and `grok_export` for Grok session inspection.
-6. Use `grok_status`, `grok_result`, and `grok_cancel` for background jobs. Treat `grok_result.outputSummary.resultComplete === true` as required before quoting Grok as a finished result.
+- Use `grok_check` when CLI discovery, compatibility, login, or model listing is uncertain. Treat `cliDiscovered`, `authenticated`, `modelsListed`, and `callable` as separate facts.
+- Configure a custom executable through trusted MCP environment variable `GROK_BIN`; never accept a binary path from a task prompt or tool argument.
+- Pass an explicit `cwd` for workspace, session, and export operations. Review and adversarial-review calls also require an explicit non-empty `target` and are forced into read-only plan mode without subagents.
+- A background start returns `data.job.id`. Call status, result, or cancel with that `jobId` only; job state is private and independent of workspace `cwd`.
+- Accept a background answer only when `data.resultComplete === true` and `data.outputTruncated === false`. Use `data.finalText`, not previews or raw log tails.
+- Continue only a known `sessionId` or explicitly request the latest session. Export returns Markdown; the plugin does not write a caller-selected output file.
 
-## Safety Defaults
+## Safety and recovery
 
-- Codex owns scope, files, verification, git, and final judgment.
-- Pass `cwd` for the workspace Grok should inspect. If omitted, Grok may run in the installed plugin directory rather than the user's active repo.
-- Use the same `cwd` for `grok_status`, `grok_result`, and `grok_cancel` that was used to start the background job.
-- Do not expose Codex hidden context, system/developer messages, tool outputs, hidden reasoning, secrets, or auth tokens.
-- Do not paste secrets or private tool output into `prompt`, `problem`, or `target`; the plugin does not redact arbitrary user-provided text.
-- Do not ask Grok to read Codex private runtime paths such as `~/.codex` unless the user explicitly authorizes `allowCodexPrivatePaths: true`.
-- Do not pass `alwaysApprove` unless the user explicitly asks for that permission behavior.
-- Prefer `disableWebSearch: true` and `noSubagents: true` for tightly bounded review or smoke tasks.
-- Use `maxTurns: 1` only for sentinel checks or prompts that do not need file/tool work. Omit `maxTurns` or set a higher limit when asking Grok to inspect repo files.
-- Treat `grok_review` and `grok_adversarial_review` as bounded second-pass reviews, not broad security scans.
-- For background jobs, never treat cancelled, running, failed, or no-end-event logs as final output.
+- Never send hidden Codex context, system/developer messages, reasoning, credentials, arbitrary tool output, or private paths such as `~/.codex`.
+- Treat `{ ok: false, error: { code, message, retryable } }` as a machine-readable business failure. Narrow the target before retrying partial, timed-out, or truncated work.
+- Do not assume capabilities or tools that the current MCP server does not advertise.
 
-## Model Notes
-
-The known local default `grok-composer-2.5-fast` does not support `--reasoning-effort`. If a caller passes `reasoningEffort` with that model, the plugin returns a warning and does not pass the flag.
-
-If no model is specified, the plugin also does not pass `reasoningEffort`, because the local default may be `grok-composer-2.5-fast`.
-
-## Transfer Boundary
-
-There is no `grok_transfer` tool in v1.
-
-Grok CLI has an `import` command, but this plugin does not ship a Codex rollout JSONL to Grok import path until that schema is proven separately.
+For bounded Codex↔Grok delegation, implementation, review gates, rescue, or handoff records, use `$grok-codex-collaboration` as the primary skill. This skill owns only the installed tool contract and is loaded alongside it only when direct capability details are needed.
