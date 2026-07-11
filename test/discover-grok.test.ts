@@ -1,16 +1,21 @@
+import { existsSync } from "node:fs";
 import { join } from "node:path";
 import { describe, expect, it } from "vitest";
-import { discoverGrok, getGrokCandidates, parseModelsOutput } from "../plugins/grok-plugin-codex/src/grok-cli.js";
+import {
+  classifyGrokFailure,
+  discoverGrok,
+  getGrokCandidates,
+  parseModelsOutput,
+  runProcess
+} from "../plugins/grok-plugin-codex/src/grok-cli.js";
 import { fakeGrokScript, makeExecutable, tempDir } from "./helpers.js";
 
 describe("Grok CLI discovery", () => {
-  it("prefers explicit grokBin before GROK_BIN and PATH candidates", async () => {
+  it("prefers trusted GROK_BIN configuration before PATH candidates", async () => {
     const dir = await tempDir();
-    const explicit = await makeExecutable(join(dir, "explicit-grok"), fakeGrokScript({ version: "grok explicit" }));
     const envBin = await makeExecutable(join(dir, "env-grok"), fakeGrokScript({ version: "grok env" }));
 
     const discovered = await discoverGrok({
-      grokBin: explicit,
       env: {
         ...process.env,
         GROK_BIN: envBin,
@@ -19,14 +24,13 @@ describe("Grok CLI discovery", () => {
     });
 
     expect(discovered.ok).toBe(true);
-    expect(discovered.bin).toBe(explicit);
-    expect(discovered.version).toBe("grok explicit");
-    expect(discovered.tried[0]).toBe(explicit);
+    expect(discovered.bin).toBe(envBin);
+    expect(discovered.version).toBe("grok env");
+    expect(discovered.tried[0]).toBe(envBin);
   });
 
   it("orders candidates according to the documented discovery chain", () => {
     const candidates = getGrokCandidates({
-      grokBin: "~/custom/grok",
       env: {
         GROK_BIN: "~/env/grok",
         HOME: "/Users/example",
@@ -34,8 +38,7 @@ describe("Grok CLI discovery", () => {
       }
     });
 
-    expect(candidates.slice(0, 6)).toEqual([
-      "/Users/example/custom/grok",
+    expect(candidates.slice(0, 5)).toEqual([
       "/Users/example/env/grok",
       "/Users/example/.grok/bin/grok",
       "/Users/example/.local/bin/grok",
@@ -65,5 +68,41 @@ describe("Grok CLI discovery", () => {
       { id: "grok-composer-2.5-fast", default: true },
       { id: "grok-build", default: false }
     ]);
+  });
+
+  it("kills the foreground process tree on timeout", async () => {
+    const dir = await tempDir();
+    const marker = join(dir, "grandchild-finished.txt");
+    const childCode = `setTimeout(() => require('node:fs').writeFileSync(${JSON.stringify(marker)}, 'finished'), 500)`;
+    const command = await makeExecutable(
+      join(dir, "hang.sh"),
+      `#!/bin/sh
+${JSON.stringify(process.execPath)} -e ${JSON.stringify(childCode)} &
+while true; do sleep 1; done
+`
+    );
+
+    const result = await runProcess(command, [], { cwd: dir, timeoutMs: 50 });
+    await new Promise((resolvePromise) => setTimeout(resolvePromise, 700));
+
+    expect(result.timedOut).toBe(true);
+    expect(existsSync(marker)).toBe(false);
+  });
+
+  it("classifies HTTP 402 balance exhaustion as quota_exhausted", () => {
+    const code = classifyGrokFailure({
+      command: "grok",
+      args: [],
+      exitCode: 1,
+      signal: null,
+      stdout: '{"type":"error","data":"Payment Required"}',
+      stderr: "API error (status 402 Payment Required): Grok Build usage balance exhausted",
+      durationMs: 1,
+      stdoutTruncated: false,
+      stderrTruncated: false,
+      timedOut: false
+    });
+
+    expect(code).toBe("quota_exhausted");
   });
 });

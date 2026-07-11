@@ -22,7 +22,8 @@ npm run smoke:live-grok
 
 - Keep tool behavior, docs, tests, and MCP smoke coverage aligned.
 - Do not copy Codex hidden context, system/developer messages, tool outputs, hidden reasoning, secrets, or private runtime paths into prompts.
-- Keep background job records inside `.grok-plugin-codex/jobs`.
+- Keep job state in the plugin-owned private user-state directory; never write runtime state into a user workspace.
+- Preserve the macOS/Linux process-tree lifecycle contract, monotonic terminal records, and prompt cleanup when changing worker behavior.
 - Treat partial Grok output as partial evidence, not as a finished review or implementation result.
 - Add or update tests for behavior changes.
 

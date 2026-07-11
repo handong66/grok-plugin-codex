@@ -1,7 +1,7 @@
 {
   "name": "grok-plugin-codex",
-  "version": "0.1.0",
-  "description": "Use Grok CLI from Codex for bounded runs, reviews, rescue analysis, sessions, exports, and background jobs.",
+  "version": "0.2.0+codex.20260711001630",
+  "description": "Operate Grok CLI on macOS/Linux through a bounded Codex MCP layer with private background state.",
   "author": {
     "name": "handong66",
     "url": "https://github.com/handong66"
@@ -20,8 +20,8 @@
   "mcpServers": "./.mcp.json",
   "interface": {
     "displayName": "Grok for Codex",
-    "shortDescription": "Run Grok CLI from Codex",
-    "longDescription": "Call Grok from Codex for bounded runs, reviews, rescue analysis, adversarial review, session listing/export, and background job management without hidden Codex context transfer.",
+    "shortDescription": "Operate Grok CLI safely from Codex",
+    "longDescription": "On macOS and Linux, check Grok CLI capabilities, run explicit prompts, continue or export sessions, request enforced read-only reviews, and manage restart-safe jobs without hidden Codex context transfer or workspace state pollution.",
     "developerName": "handong66",
     "category": "Developer Tools",
     "capabilities": [
@@ -32,9 +32,9 @@
     "privacyPolicyURL": "https://github.com/handong66/grok-plugin-codex/blob/main/docs/privacy.md",
     "termsOfServiceURL": "https://github.com/handong66/grok-plugin-codex/blob/main/docs/terms.md",
     "defaultPrompt": [
-      "Use Grok to review the current diff.",
-      "Ask Grok for rescue analysis.",
-      "Run Grok on this repo task."
+      "Check my Grok CLI, login, and available models.",
+      "Run this exact prompt with Grok in the active workspace.",
+      "Inspect my Grok sessions and export one as Markdown."
     ],
     "brandColor": "#111827"
   }

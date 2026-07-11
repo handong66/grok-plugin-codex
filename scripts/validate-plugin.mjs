@@ -9,6 +9,9 @@ const mcpPath = join(root, ".mcp.json");
 const skillPath = join(root, "skills", "grok", "SKILL.md");
 const marketplacePath = join(repoRoot, ".agents", "plugins", "marketplace.json");
 const distPath = join(root, "dist", "server.js");
+const workerDistPath = join(root, "dist", "job-worker.js");
+const packagePath = join(repoRoot, "package.json");
+const serverSourcePath = join(root, "src", "server.ts");
 const privacyPath = join(repoRoot, "docs", "privacy.md");
 const termsPath = join(repoRoot, "docs", "terms.md");
 const securityPath = join(repoRoot, "SECURITY.md");
@@ -30,17 +33,45 @@ function requireString(object, field, source = "plugin.json") {
   }
 }
 
-for (const path of [manifestPath, mcpPath, skillPath, marketplacePath, distPath, privacyPath, termsPath, securityPath, contributingPath]) {
+for (const path of [
+  manifestPath,
+  mcpPath,
+  skillPath,
+  marketplacePath,
+  distPath,
+  workerDistPath,
+  packagePath,
+  serverSourcePath,
+  privacyPath,
+  termsPath,
+  securityPath,
+  contributingPath
+]) {
   if (!existsSync(path)) errors.push(`missing ${path}`);
 }
 
 const manifest = readJson(manifestPath);
+const packageJson = readJson(packagePath);
 for (const field of ["name", "version", "description", "skills", "mcpServers", "homepage", "repository", "license"]) {
   requireString(manifest, field);
 }
 if (manifest.name !== "grok-plugin-codex") errors.push("plugin name must be grok-plugin-codex");
 if (!/^\d+\.\d+\.\d+(?:[-+][0-9A-Za-z.-]+)?$/.test(manifest.version ?? "")) {
   errors.push("plugin version must be semver");
+}
+const manifestBaseVersion = String(manifest.version ?? "").split("+")[0];
+if (manifestBaseVersion !== packageJson.version) {
+  errors.push("plugin base version must match package version");
+}
+if (
+  manifest.version !== packageJson.version &&
+  !String(manifest.version).startsWith(`${packageJson.version}+codex.`)
+) {
+  errors.push("plugin build metadata must be a single +codex.<cachebuster> suffix");
+}
+const serverSource = existsSync(serverSourcePath) ? readFileSync(serverSourcePath, "utf8") : "";
+if (!serverSource.includes(`version: "${packageJson.version}"`)) {
+  errors.push("MCP server version must match package base version");
 }
 if (manifest.skills !== "./skills/") errors.push("skills must point to ./skills/");
 if (manifest.mcpServers !== "./.mcp.json") errors.push("mcpServers must point to ./.mcp.json");
@@ -63,7 +94,7 @@ const server = mcp.mcpServers?.["grok-plugin-codex"];
 if (!server) errors.push(".mcp.json must define grok-plugin-codex server");
 if (server?.command !== "node") errors.push("MCP server command must be node");
 if (!server?.args?.includes("./dist/server.js")) errors.push("MCP server must launch ./dist/server.js");
-for (const envVar of ["GROK_BIN", "HOME", "PATH"]) {
+for (const envVar of ["GROK_BIN", "GROK_PLUGIN_STATE_DIR", "HOME", "PATH", "XDG_STATE_HOME"]) {
   if (!server?.env_vars?.includes(envVar)) errors.push(`MCP server env_vars must include ${envVar}`);
 }
 
@@ -81,10 +112,14 @@ if (marketplaceEntry?.category !== "Developer Tools") errors.push("marketplace c
 const skill = existsSync(skillPath) ? readFileSync(skillPath, "utf8") : "";
 if (!skill.startsWith("---\n")) errors.push("skill must start with YAML frontmatter");
 if (!skill.includes("name: grok")) errors.push("skill frontmatter must name grok");
-if (!skill.includes("grok_transfer")) errors.push("skill must document why grok_transfer is not in v1");
+if (!skill.includes("GROK_BIN")) errors.push("skill must document trusted GROK_BIN configuration");
+if (!skill.includes("resultComplete")) errors.push("skill must document background finality");
+if (!skill.includes("$grok-codex-collaboration")) errors.push("skill must route orchestration to grok-codex-collaboration");
 
 const dist = existsSync(distPath) ? readFileSync(distPath, "utf8") : "";
 if (!dist.startsWith("#!/usr/bin/env node")) errors.push("dist/server.js must be executable Node script with shebang");
+const workerDist = existsSync(workerDistPath) ? readFileSync(workerDistPath, "utf8") : "";
+if (!workerDist.startsWith("#!/usr/bin/env node")) errors.push("dist/job-worker.js must be executable Node script with shebang");
 
 if (errors.length) {
   console.error("Plugin validation failed:");

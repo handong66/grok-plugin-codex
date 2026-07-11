@@ -16,7 +16,8 @@ In scope:
 
 - Prompt or path handling that can expose Codex private runtime context without explicit user authorization.
 - Environment leakage beyond the documented Grok child-process allowlist.
-- Background job file handling that can read or write outside the selected working directory.
+- Job-state handling that can escape the plugin-owned private state directory or bypass the authorized workspace boundary.
+- Process-tree, cancellation, timeout, or prompt-cleanup failures on supported macOS/Linux hosts that can leave Grok work running after a terminal result.
 - MCP tool behavior that misrepresents incomplete Grok output as a final result.
 
 Out of scope:
