@@ -5,6 +5,7 @@
 Version `0.2.0` is a breaking contract release. It replaces workspace-local background state with a private central worker architecture, removes caller-selected executable and export paths, requires explicit review targets, and returns typed MCP envelopes.
 
 Repository: https://github.com/handong66/grok-plugin-codex
+Write-up: https://han-dong.link/en/work/grok-plugin-codex
 
 ## Requirements
 
