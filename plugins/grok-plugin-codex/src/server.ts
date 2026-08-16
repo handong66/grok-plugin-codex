@@ -11,6 +11,7 @@ import {
   grokCheck,
   grokContinue,
   grokExport,
+  grokFinalize,
   grokModels,
   grokRescue,
   grokResult,
@@ -198,6 +199,30 @@ server.registerTool(
     outputSchema
   },
   (args, extra) => grokContinue(withCodexWorkspaceRoots(args, extra._meta))
+);
+
+server.registerTool(
+  "grok_finalize",
+  {
+    title: "Finalize Grok Answer",
+    description:
+      "One-turn, tool-free finish of work that already exists: resumes the session behind jobId (or an " +
+      "explicit sessionId, or the latest session in cwd) with maxTurns 1 and a fixed prompt to stop using " +
+      "tools, emit the complete answer now, and mark anything unverified as UNVERIFIED. This is the " +
+      "remedy for timeout, max_turns_reached, cancelled_output and permission_denied_headless — it " +
+      "recovers an answer in seconds instead of rerunning the task. It inherits the read-only mode of the " +
+      "session it resumes.",
+    inputSchema: {
+      cwd: cwdRequired,
+      jobId: jobIdSchema.optional(),
+      sessionId: z.string().trim().min(1).max(256).optional(),
+      model: z.string().trim().min(1).max(512).optional(),
+      timeoutMs: timeoutSchema,
+      background: backgroundSchema
+    },
+    outputSchema
+  },
+  (args, extra) => grokFinalize(withCodexWorkspaceRoots(args, extra._meta))
 );
 
 server.registerTool(

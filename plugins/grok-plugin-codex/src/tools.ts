@@ -958,6 +958,54 @@ export async function grokAdversarialReview(args: CommonArgs & { target: string 
   return await runOrStartJob({ ...args, kind: "adversarial_review", prompt, readOnly: true });
 }
 
+/**
+ * GK4: "stop using tools and answer now" was the single most effective recovery in the recorded
+ * window — 21 of 26 `--max-turns 1|2` jobs succeeded and none hit the turn limit — yet 71 of 196
+ * observed `grok_continue` prompts had to reinvent it, each in its own words. This makes it one call.
+ */
+export const FINALIZE_PROMPT =
+  "Stop using tools now. Do not read, search, or run anything else. Emit the complete final answer " +
+  "immediately, using only what you already have. Mark every claim you could not verify as UNVERIFIED " +
+  "and list what you did not inspect.";
+
+export async function grokFinalize(args: {
+  cwd: string;
+  jobId?: string;
+  sessionId?: string;
+  model?: string;
+  timeoutMs?: number;
+  background?: boolean;
+  _workspaceRoots?: string[];
+}) {
+  let sessionId = args.sessionId;
+  if (!sessionId && args.jobId) {
+    try {
+      const record = await new JobStore().read(args.jobId);
+      sessionId = record.grokSessionId;
+      if (!sessionId) {
+        throw new GrokPluginError(
+          "finalize_target_unknown",
+          "That job never learned a Grok session id, so there is nothing to finalize. Read the partial " +
+            "answer with grok_result, or start a new run.",
+          false,
+          { jobId: args.jobId }
+        );
+      }
+    } catch (error) {
+      return failure(error);
+    }
+  }
+  return await runOrStartJob({
+    ...args,
+    kind: "continue",
+    prompt: FINALIZE_PROMPT,
+    maxTurns: 1,
+    sessionId,
+    continueLatest: sessionId ? undefined : true,
+    background: args.background ?? false
+  });
+}
+
 export async function grokSessions(args: { cwd: string; timeoutMs?: number; query?: string; limit?: number; _workspaceRoots?: string[] }) {
   return await guarded(async () => {
     const cwd = await resolveWorkspaceCwd(args.cwd, args._workspaceRoots);

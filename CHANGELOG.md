@@ -72,6 +72,15 @@ All notable user-visible and contract changes to `grok-plugin-codex`.
 
 ### Added
 
+- **GK4 — `grok_finalize`, the recovery that worked, as one call.** "Stop using tools and answer now"
+  was the most effective recovery in the recorded window (21 of 26 `--max-turns 1|2` jobs succeeded,
+  none hit the turn limit), yet 71 of 196 observed `grok_continue` prompts reinvented it in their own
+  words. The new **`grok_finalize`** tool resumes the session behind a `jobId` (or an explicit
+  `sessionId`, or the latest session in `cwd`) with `maxTurns: 1` and a fixed prompt: stop using tools,
+  emit the complete answer now, mark anything unverified as `UNVERIFIED`. It inherits the read-only
+  mode of the session it resumes. Every partial-result message — `timeout`, `terminated`,
+  `max_turns_reached`, `cancelled_output` — now names it.
+
 - **GPC-08 / GK3 / SPEC §D M3 — the budget is now stated to the delegate, and defaults per kind.**
   A turn or wall-clock limit with no answer used to be a total loss; plugin-built prompts
   (`grok_review`, `grok_adversarial_review`, `grok_rescue`) now tell Grok its turn budget and its

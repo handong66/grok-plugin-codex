@@ -143,7 +143,9 @@ printf '%s\n' '{"type":"text","data":"I will review the diff."}' '{"type":"end",
       expect(parsed.error.details.stopReasonRecognised).toBe(true);
       expect(parsed.error.details.grokSessionId).toBe("cancelled-session");
       expect(parsed.error.details.textPreview).toBe("I will review the diff.");
-      expect(parsed.error.details.guidance).toContain("Continue the same session");
+      // GK4: the remedy names the one-call primitive first, then the manual equivalent.
+      expect(parsed.error.details.guidance).toContain("grok_finalize");
+      expect(parsed.error.details.guidance).toContain("grok_continue, maxTurns: 1");
     }
   );
 

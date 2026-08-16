@@ -471,10 +471,10 @@ export function isRetryableGrokFailure(code: string): boolean {
  */
 export function CONTINUE_WITHOUT_TOOLS_REMEDY(cause: string): string {
   return (
-    `${cause} Continue the same session with grok_continue, maxTurns: 1, and a prompt that says ` +
-    "to stop using tools and emit the complete final answer now; do not use any tools. " +
-    "Do not rerun the whole task, and do not raise the budget first — the partial answer is still " +
-    "available from grok_result with the returned jobId."
+    `${cause} Call grok_finalize with this jobId — one turn, no tools, complete answer — or do the ` +
+    "same by hand with grok_continue, maxTurns: 1, and a prompt that says to stop using tools and emit " +
+    "the complete final answer now; do not use any tools. Do not rerun the whole task, and do not raise " +
+    "the budget first — the partial answer is still available from grok_result with the returned jobId."
   );
 }
 
@@ -522,8 +522,10 @@ export function grokFailureMessage(code: string): string {
       return CONTINUE_WITHOUT_TOOLS_REMEDY(
         "Grok reached the configured turn limit before producing a final result."
       );
+    case "timeout":
+      return CONTINUE_WITHOUT_TOOLS_REMEDY("Grok ran out of wall-clock budget before producing a final result.");
     case "terminated":
-      return "Grok was terminated before producing a final result.";
+      return CONTINUE_WITHOUT_TOOLS_REMEDY("Grok was terminated before producing a final result.");
     default:
       return "Grok CLI exited without a usable final result.";
   }

@@ -17,6 +17,7 @@ const requiredTools = [
   "grok_adversarial_review",
   "grok_sessions",
   "grok_export",
+  "grok_finalize",
   "grok_status",
   "grok_result",
   "grok_cancel"
@@ -106,6 +107,10 @@ const expectedSchemas = {
       "timeoutMs"
     ],
     required: ["cwd", "target"]
+  },
+  grok_finalize: {
+    properties: ["background", "cwd", "jobId", "model", "sessionId", "timeoutMs"],
+    required: ["cwd"]
   },
   grok_sessions: {
     properties: ["cwd", "limit", "query", "timeoutMs"],
