@@ -93,8 +93,11 @@ as `true` / `false` / `"unknown"` rather than `null`; new tool `grok_finalize`; 
   every gate ran on the author's macOS machine, while the 0.2 audit asked for a macOS/Linux matrix and
   the user's expectation was "push, open a PR, wait for CI". `pull-request-ci.yml` now runs
   `npm run check` on `ubuntu-latest` and `macos-latest` and fails if the committed bundles differ from
-  a fresh build. `docs/verification.md` carries a dated record naming the CLI version, and requires one
-  per release. Tool descriptions state the typical wall time per kind (continue ~62 s, run ~129 s,
+  a fresh build. `docs/verification.md` now keeps two dated records per release and requires both: an
+  offline line for `npm run check`, and a live line naming the Grok CLI version `npm run smoke:live-grok`
+  ran against. Neither substitutes for the other, and the live line for 0.3.0 is still open — the offline
+  gate observes no CLI, so it cannot answer "does this work with that CLI".
+  Tool descriptions state the typical wall time per kind (continue ~62 s, run ~129 s,
   review ~171 s, adversarial_review ~223 s median) and say not to cancel before `timeoutMs` unless
   `waitingForAuth` is set or the event counters have not moved for 45 s — 26 of 43 recorded cancels
   fired before the median completion time.
