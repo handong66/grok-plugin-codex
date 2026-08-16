@@ -150,6 +150,16 @@ export type JobOutputSummary = {
   toolCallCount: number;
   /** File paths named by tool events, bounded and de-duplicated. */
   filesInspected: string[];
+  /**
+   * Tool calls the headless permission mode refused, by name (GPC-06). 24 of the 56 recorded
+   * plan-mode jobs each contain one `User cancelled the execution for tool run_terminal_command`.
+   */
+  deniedToolCalls: { name: string; count: number }[];
+  /**
+   * GK5: the run ended right after a shell command was refused in plan mode, so the cause is the
+   * permission mode and not a target that was too wide.
+   */
+  shellApprovalBlocked: boolean;
   /** Turn count reported by the `end` event, when the CLI provides one. */
   turnsUsed?: number;
   /** none = no tool call at all; thin = tools but no files or a very short answer. */

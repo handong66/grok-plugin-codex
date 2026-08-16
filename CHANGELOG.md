@@ -6,6 +6,17 @@ All notable user-visible and contract changes to `grok-plugin-codex`.
 
 ### Fixed
 
+- **GPC-06 — read-only prompts never said shell execution was unavailable.** All three enforced
+  read-only prompts run under `--permission-mode plan --no-subagents`, which auto-refuses shell
+  execution; 24 of the 56 recorded plan-mode jobs each carry one
+  `User cancelled the execution for tool run_terminal_command`, and one continuation reported
+  `Verdict: FAIL` for a diff it had never been allowed to load. `grok_review`,
+  `grok_adversarial_review`, and `grok_rescue` now open with an explicit notice that only
+  `read_file`, `grep`, and `list_dir` are available, that `run_terminal_command` must not be called,
+  and that missing command output must be requested rather than guessed or failed. Refusals are
+  counted in the new **`outputSummary.deniedToolCalls: { name, count }[]`**, raise a warning, and
+  replace the guidance with "inline the required command output into the target".
+
 - **GPC-04 — quota exhaustion reported as retryable, or as an auth problem.** The quota patterns matched none
   of the vendor's real texts (the CLI writes `You’ve` with U+2019, so an ASCII-apostrophe pattern never fired),
   and a bare `includes("forbidden")` turned a 403 spending-limit into `auth_required` — 11 of 64 failures

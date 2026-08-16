@@ -13,6 +13,22 @@ export function normalizeStopReason(value: string | undefined): string {
   return (value ?? "").toLowerCase().replace(/[^a-z]/g, "");
 }
 
+/**
+ * GPC-06 / GK5. Both remedies name the permission mode, because "narrow the target" — the sentence
+ * these replace — is unrelated to the observed cause: the read-only session auto-refuses shell
+ * execution, and the delegate has no way to produce `git diff` output for itself.
+ */
+export const INLINE_COMMAND_OUTPUT_REMEDY =
+  "Grok asked for a tool this read-only session refuses. Inline the required command output " +
+  "(diff, test log, command result) into the target and rerun, or continue the session with a prompt " +
+  "that supplies it. Do not widen permissions and do not treat a verdict reached without that evidence " +
+  "as a review. Codex must still verify every finding against the workspace.";
+
+export const SHELL_APPROVAL_REMEDY =
+  "The turn was cancelled because a shell command needed approval in plan mode, not because the target " +
+  "was too wide. Inline the required command output into the target, or continue the session with " +
+  "\"do not use tools\". Narrowing the target does not address this.";
+
 const NORMAL_COMPLETION_STOP_REASONS = new Set(["endturn"]);
 const CANCELLED_STOP_REASONS = new Set(["cancelled", "canceled"]);
 /** 26 of 64 recorded "successful" answers were shorter than this. */
@@ -95,6 +111,24 @@ function toolCallIdOf(event: Record<string, unknown>): string | undefined {
 }
 
 const FILE_PATH_KEYS = new Set(["path", "file", "file_path", "filePath", "filename", "fileName", "uri"]);
+
+/**
+ * GPC-06: `--permission-mode plan` auto-refuses shell execution, but none of the three read-only
+ * prompts ever said so, so Grok tried anyway and stopped. The refusal is only visible as this
+ * sentence inside a `tool_call_update` payload, and it was never counted anywhere.
+ */
+const DENIED_TOOL_PATTERN = /cancelled the execution for tool[:\s]+([A-Za-z0-9_.:-]+)/i;
+const SHELL_TOOL_PATTERN = /(?:run_terminal_command|terminal|shell|bash)/i;
+const TOOL_NAME_KEYS = ["name", "toolName", "tool_name", "tool"] as const;
+
+function toolNameOf(event: Record<string, unknown>): string | undefined {
+  const data = nestedRecord(event.data);
+  for (const key of TOOL_NAME_KEYS) {
+    const value = stringValue(event[key]) ?? stringValue(data?.[key]);
+    if (value) return value;
+  }
+  return undefined;
+}
 
 /**
  * The paths here are chosen by Grok, not by the caller: the recorded delegates opened
@@ -213,6 +247,8 @@ export function summarizeGrokOutput(
   const redactInspectedPath = exemptWorkspacePaths(redact, record.cwd);
   let toolEventCount = 0;
   let turnsUsed: number | undefined;
+  const deniedToolCounts = new Map<string, number>();
+  let lastToolName: string | undefined;
 
   for (const line of stdout.split(/\r?\n/)) {
     if (!line.trim()) continue;
@@ -235,6 +271,13 @@ export function summarizeGrokOutput(
       const id = toolCallIdOf(event);
       if (id) toolCallIds.add(id);
       collectInspectedFiles(event, filesInspected, redactInspectedPath);
+      const toolName = toolNameOf(event);
+      if (toolName) lastToolName = toolName;
+      const denied = DENIED_TOOL_PATTERN.exec(line);
+      if (denied) {
+        const name = denied[1] ?? toolName ?? "unknown";
+        deniedToolCounts.set(name, (deniedToolCounts.get(name) ?? 0) + 1);
+      }
     }
     if (eventType === "thought") thoughtEventCount += 1;
     if (eventType === "text") {
@@ -299,9 +342,21 @@ export function summarizeGrokOutput(
     warnings.push("verdict produced with 0 tool calls — treat as opinion, not review");
   }
 
+  const deniedToolCalls = [...deniedToolCounts.entries()].map(([name, count]) => ({ name, count }));
+  const deniedShell = deniedToolCalls.some((entry) => SHELL_TOOL_PATTERN.test(entry.name));
+  // GK5: a `cancelled` end whose last tool activity was a shell command in an enforced read-only
+  // session was reported as "narrow the target", which is unrelated to the actual cause.
+  const shellApprovalBlocked =
+    state === "cancelled_partial" &&
+    (deniedShell || Boolean(lastToolName && SHELL_TOOL_PATTERN.test(lastToolName)));
+
   const resultComplete = state === "succeeded_with_text" && !zeroEvidenceVerdict;
   let guidance: string;
-  if (resultComplete) {
+  if (shellApprovalBlocked) {
+    guidance = SHELL_APPROVAL_REMEDY;
+  } else if (deniedToolCalls.length) {
+    guidance = INLINE_COMMAND_OUTPUT_REMEDY;
+  } else if (resultComplete) {
     guidance = "Grok produced complete final text. Codex must still verify findings against the workspace before acting on them.";
   } else if (zeroEvidenceVerdict) {
     guidance =
@@ -329,6 +384,13 @@ export function summarizeGrokOutput(
   if (outputTruncated && !textTruncated) {
     warnings.push("capture window overflowed, but only non-answer stream payload was dropped");
   }
+  if (deniedToolCalls.length) {
+    warnings.push(
+      `the read-only session refused ${deniedToolCalls
+        .map((entry) => `${entry.name} x${entry.count}`)
+        .join(", ")}; any conclusion that depended on that output rests on evidence Grok never got`
+    );
+  }
   if (skillsLoaded.size) {
     warnings.push(
       `Grok loaded ${skillsLoaded.size} interactive skill file(s) (${[...skillsLoaded].join(", ")}) during a ` +
@@ -345,6 +407,8 @@ export function summarizeGrokOutput(
     skillsLoaded: [...skillsLoaded],
     toolCallCount,
     filesInspected: [...filesInspected],
+    deniedToolCalls,
+    shellApprovalBlocked,
     turnsUsed,
     evidenceLevel,
     eventCounts,
