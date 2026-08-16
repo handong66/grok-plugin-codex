@@ -49,6 +49,11 @@ Adding, removing, or renaming a tool or argument must change the source schema a
 - Read-only review/rescue tools force `--permission-mode plan` and `--no-subagents`.
 - Mutable runs pass `--always-approve` only when explicitly requested.
 - Continuation requires `sessionId` or explicit `continueLatest: true`.
+- A continuation inherits the read-only mode of the session's creating job; `continueLatest` infers that job from
+  the newest session this plugin started in the same `cwd`. The inference may only tighten permissions: it refuses
+  `alwaysApprove` (`readonly_session_escalation`, `details.inferredFromLatestJob`) and inherits plan mode, but it
+  never removes the "could not be verified" warning, which every inferred target keeps. SKILL.md and the
+  `grok_continue` description must state that rule and the explicit-`sessionId` escape hatch.
 - Discovery uses trusted `GROK_BIN`; there is no per-call executable path.
 - Required safety flags are capability-probed from the installed `grok --help` and fail closed when absent.
 - `missingRunCapabilities` is that gate and has one caller list: every path that starts a real Grok process, including

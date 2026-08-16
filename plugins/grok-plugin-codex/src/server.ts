@@ -158,7 +158,13 @@ server.registerTool(
     description:
       "Continue a known Grok session or explicitly continue the latest session. A session created by a " +
       "read-only job (review, adversarial review, rescue) is resumed in enforced plan mode without " +
-      "subagents, and alwaysApprove on such a session is rejected with readonly_session_escalation.",
+      "subagents, and alwaysApprove on such a session is rejected with the non-retryable " +
+      "readonly_session_escalation; an unknown sessionId proceeds with a warning that the original mode " +
+      "could not be verified. continueLatest names no session, so the plugin infers the target from the " +
+      "newest session it started in this cwd and uses that inference only to restrict: an inferred " +
+      "read-only session rejects alwaysApprove with details.inferredFromLatestJob true, and every " +
+      "continueLatest call warns that the resumed session could not be verified. Pass an explicit " +
+      "sessionId to continue a known mutable session.",
     inputSchema: {
       ...mutableExecutionShape,
       sessionId: z.string().trim().min(1).max(256).optional(),
