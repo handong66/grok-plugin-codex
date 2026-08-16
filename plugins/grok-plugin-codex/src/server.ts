@@ -240,8 +240,28 @@ server.registerTool(
   "grok_status",
   {
     title: "Grok Job Status",
-    description: "Read a background Grok job from the private central state store.",
-    inputSchema: { jobId: jobIdSchema },
+    description:
+      "Read a background Grok job from the private central state store, including cheap progress " +
+      "(textChars, eventCounts, lastEventAt, toolCallCount, deniedToolCalls, grokSessionId) that needs " +
+      "no grok_result call. Typical wall time on this machine: continue ~62s, run ~129s, review ~171s, " +
+      "adversarial_review ~223s (median). Do not cancel before timeoutMs unless job.waitingForAuth is " +
+      "true or eventCounts/lastEventAt have not moved for more than 45s. Note that reading status may " +
+      "reap a job whose worker is gone: a run with no heartbeat for 15s and no progress is recorded as " +
+      "worker_unavailable.",
+    inputSchema: {
+      jobId: jobIdSchema,
+      waitMs: z
+        .number()
+        .int()
+        .positive()
+        .max(30_000)
+        .optional()
+        .describe(
+          "Block server-side until the job is terminal, for at most this many milliseconds (cap 30000). " +
+            "data.waited says whether the call actually blocked. One waiting status call plus one " +
+            "grok_result replaces a polling loop."
+        )
+    },
     outputSchema
   },
   grokStatus
@@ -263,6 +283,23 @@ server.registerTool(
         .describe(
           "Default false. true adds stdoutTail/stderrTail: tens of thousands of characters of per-token " +
             "streaming JSON that duplicate finalText. Use only for diagnosis."
+        ),
+      finalTextOffset: z
+        .number()
+        .int()
+        .min(0)
+        .max(10_000_000)
+        .optional()
+        .describe("Start of the returned finalText window. Page with data.finalTextNextOffset."),
+      finalTextMaxChars: z
+        .number()
+        .int()
+        .positive()
+        .max(100_000)
+        .optional()
+        .describe(
+          "Characters of finalText to return from finalTextOffset. data.finalTextChars is the full length; " +
+            "data.finalTextNextOffset is absent once the window reaches the end."
         )
     },
     outputSchema

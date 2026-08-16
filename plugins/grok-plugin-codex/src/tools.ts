@@ -908,13 +908,51 @@ export async function grokExport(args: { cwd: string; timeoutMs?: number; sessio
   });
 }
 
-export async function grokStatus(args: { jobId: string }) {
-  return await guarded(async () => success({ job: toPublicJob(await new JobStore().status(args.jobId)) }));
+/** GPC-07: a server-side wait, capped well below the ~300s MCP `tools/call` ceiling. */
+export const STATUS_MAX_WAIT_MS = 30_000;
+const STATUS_WAIT_POLL_MS = 250;
+
+export async function grokStatus(args: { jobId: string; waitMs?: number }) {
+  return await guarded(async () => {
+    const store = new JobStore();
+    let record = await store.status(args.jobId);
+    // `waited` reports whether this call actually blocked, so a caller can tell "already finished"
+    // apart from "finished while I waited" without timing the round trip itself.
+    let waited = false;
+    if (args.waitMs !== undefined && !TERMINAL_JOB_STATUSES.has(record.status)) {
+      waited = true;
+      const deadline = Date.now() + Math.min(Math.max(args.waitMs, 0), STATUS_MAX_WAIT_MS);
+      while (!TERMINAL_JOB_STATUSES.has(record.status) && Date.now() < deadline) {
+        await sleep(STATUS_WAIT_POLL_MS);
+        record = await store.status(args.jobId);
+      }
+    }
+    const progress = await store.readStreamProgress(args.jobId);
+    return success({ waited, job: toPublicJob(record, progress) });
+  });
 }
 
-export async function grokResult(args: { jobId: string; maxChars?: number; includeRawTail?: boolean }) {
+export async function grokResult(args: {
+  jobId: string;
+  maxChars?: number;
+  includeRawTail?: boolean;
+  finalTextOffset?: number;
+  finalTextMaxChars?: number;
+}) {
   return await guarded(async () => {
     const result = await new JobStore().result(args.jobId, args.maxChars);
+    // GPC-07: a caller that only needs the head of a long answer should not have to receive all of
+    // it — and the same string used to be returned twice, in `finalText` and inside `outputSummary`.
+    const fullText = result.outputSummary.finalText ?? "";
+    const offset = Math.min(Math.max(args.finalTextOffset ?? 0, 0), fullText.length);
+    const window =
+      args.finalTextMaxChars === undefined
+        ? fullText.slice(offset)
+        : fullText.slice(offset, offset + Math.max(args.finalTextMaxChars, 1));
+    const nextOffset = offset + window.length < fullText.length ? offset + window.length : undefined;
+    if (result.outputSummary.finalText !== undefined) {
+      result.outputSummary = { ...result.outputSummary, finalText: window || undefined };
+    }
     // Full captured text is returned whatever `resultComplete` says; a partial answer that was
     // already paid for must never be destroyed by the completeness verdict.
     const complete = result.outputSummary.resultComplete;
@@ -924,7 +962,8 @@ export async function grokResult(args: { jobId: string; maxChars?: number; inclu
           jobId: result.record.id,
           cwd: result.record.cwd,
           grokSessionId: result.record.grokSessionId ?? result.outputSummary.grokSessionId,
-          partialTextChars: result.outputSummary.finalText?.length ?? 0
+          // The handle reports the whole partial answer, not the page this call happened to ask for.
+          partialTextChars: fullText.length
         });
     return success(
       {
@@ -933,7 +972,10 @@ export async function grokResult(args: { jobId: string; maxChars?: number; inclu
         // every one of 656 recorded result calls. They are diagnostics, returned only on request.
         ...(args.includeRawTail === true ? { stdoutTail: result.stdout, stderrTail: result.stderr } : {}),
         outputSummary: result.outputSummary,
-        finalText: result.outputSummary.finalText,
+        finalText: window || undefined,
+        finalTextChars: fullText.length,
+        finalTextOffset: offset,
+        ...(nextOffset === undefined ? {} : { finalTextNextOffset: nextOffset }),
         resultComplete: complete,
         outputTruncated: result.outputSummary.outputTruncated,
         ...(recovered ? { recovery: recovered.recovery } : {})

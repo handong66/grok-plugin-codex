@@ -160,7 +160,12 @@ async function isRecognizedPreMarkerStateDir(stateDir: string, stateMode: number
   return true;
 }
 
-export function toPublicJob(record: JobRecord): PublicJob {
+/**
+ * GPC-07: `progress` is the cheap half of the ledger. Without it `grok_status` could only say
+ * "running", so every status call was followed by an expensive `grok_result` to find out anything —
+ * 730 status calls against 656 result calls in the recorded window.
+ */
+export function toPublicJob(record: JobRecord, progress?: Omit<StreamFacts, "finalText">): PublicJob {
   return {
     id: record.id,
     kind: record.kind,
@@ -174,7 +179,17 @@ export function toPublicJob(record: JobRecord): PublicJob {
     exitCode: record.exitCode,
     signal: record.signal,
     error: record.error,
-    outputTruncated: record.outputTruncated
+    outputTruncated: record.outputTruncated,
+    ...(progress
+      ? {
+          grokSessionId: record.grokSessionId ?? progress.grokSessionId,
+          textChars: progress.textChars,
+          eventCounts: progress.eventCounts,
+          lastEventAt: progress.lastEventAt,
+          toolCallCount: progress.toolCallCount,
+          deniedToolCalls: progress.deniedToolCalls
+        }
+      : {})
   };
 }
 
@@ -721,11 +736,11 @@ export class JobStore {
   }
 
   /**
-   * GPC-03b: the worker's incremental ledger, when it exists and is intact. A record written before
-   * 0.3.0 — or one whose answer outgrew the ledger cap — returns `undefined`, and the caller falls
-   * back to the full re-parse that was the only path in 0.2.x.
+   * GPC-07: the cheap half of the ledger — one small read, no stream tail and no re-parse — so
+   * `grok_status` can say how far a run has got. Before this, `toPublicJob` carried only lifecycle
+   * fields, so 730 status calls were followed by 656 expensive `grok_result` calls to learn anything.
    */
-  async readStreamFacts(jobId: string): Promise<StreamFacts | undefined> {
+  async readStreamProgress(jobId: string): Promise<Omit<StreamFacts, "finalText"> | undefined> {
     const raw = await readFile(this.summaryPath(jobId), "utf8").catch(() => null);
     if (!raw?.trim()) return undefined;
     let parsed: unknown;
@@ -738,11 +753,9 @@ export class JobStore {
     const summary = parsed as Partial<StreamFacts> & { version?: number; ledgerTruncated?: boolean };
     if (summary.version !== STREAM_SUMMARY_VERSION || summary.ledgerTruncated) return undefined;
     if (!summary.eventCounts || typeof summary.eventCounts !== "object") return undefined;
-    const finalText = await readTail(this.finalTextPath(jobId), SUMMARY_READ_CHARS);
     return {
       eventCounts: summary.eventCounts,
-      finalText,
-      textChars: summary.textChars ?? finalText.length,
+      textChars: summary.textChars ?? 0,
       grokSessionId: summary.grokSessionId,
       requestId: summary.requestId,
       stopReason: summary.stopReason,
@@ -761,6 +774,23 @@ export class JobStore {
       streamError: summary.streamError
     };
   }
+
+  /**
+   * GPC-03b: the worker's incremental ledger, when it exists and is intact. A record written before
+   * 0.3.0 — or one whose answer outgrew the ledger cap — returns `undefined`, and the caller falls
+   * back to the full re-parse that was the only path in 0.2.x.
+   */
+  async readStreamFacts(jobId: string): Promise<StreamFacts | undefined> {
+    const summary = await this.readStreamProgress(jobId);
+    if (!summary) return undefined;
+    const finalText = await readTail(this.finalTextPath(jobId), SUMMARY_READ_CHARS);
+    return {
+      ...summary,
+      finalText,
+      textChars: summary.textChars || finalText.length
+    };
+  }
+
 
   async result(
     jobId: string,

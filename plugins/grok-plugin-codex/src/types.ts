@@ -128,6 +128,12 @@ export type PublicJob = {
   signal?: NodeJS.Signals | null;
   error?: PluginErrorInfo;
   outputTruncated?: boolean;
+  /** GPC-07 progress, from the worker's ledger: cheap enough to poll, no stream re-parse. */
+  textChars?: number;
+  eventCounts?: Record<string, number>;
+  lastEventAt?: string;
+  toolCallCount?: number;
+  deniedToolCalls?: { name: string; count: number }[];
 };
 
 export type JobOutputSummary = {

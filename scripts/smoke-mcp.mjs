@@ -116,11 +116,11 @@ const expectedSchemas = {
     required: ["cwd", "sessionId"]
   },
   grok_status: {
-    properties: ["jobId"],
+    properties: ["jobId", "waitMs"],
     required: ["jobId"]
   },
   grok_result: {
-    properties: ["includeRawTail", "jobId", "maxChars"],
+    properties: ["finalTextMaxChars", "finalTextOffset", "includeRawTail", "jobId", "maxChars"],
     required: ["jobId"]
   },
   grok_cancel: {

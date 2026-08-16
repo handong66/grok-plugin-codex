@@ -83,6 +83,18 @@ All notable user-visible and contract changes to `grok-plugin-codex`.
   falls back to the full re-parse. Both new artifacts are in the strict pre-marker layout allowlist and
   in `cleanupExpiredJobs`.
 
+- **GPC-07 — status could not say how far a run had got, and result could not be paged.**
+  `toPublicJob` carried lifecycle fields only, so 730 recorded `grok_status` calls were followed by
+  656 expensive `grok_result` calls just to learn something. `grok_status` now returns
+  **`textChars`, `eventCounts`, `lastEventAt`, `toolCallCount`, `deniedToolCalls`** and the session id
+  from the worker's ledger (one small read, no stream re-parse), and accepts **`waitMs`** (cap
+  `30000`) to block server-side until the job is terminal, reporting **`data.waited`**. It shares the
+  staleness rules of a plain status call, so a run whose worker is gone can still be reaped by it.
+  `grok_result` accepts **`finalTextOffset` / `finalTextMaxChars`** and returns `finalTextChars` plus
+  `finalTextNextOffset`; the window applies to `outputSummary.finalText` too, so the answer is no
+  longer serialised twice in one envelope. The `includeRawTail: false` default is the one shared with
+  GPC-03a, implemented once.
+
 - **GK1 — device-authorization hang.** When the CLI's device authorization has expired it prints a sign-in
   URL to stderr and waits for a browser that a headless job can never open, while `grok_status` still said
   `running`; three recorded jobs sat there, one for the full 600 000 ms, during an unattended overnight run.
