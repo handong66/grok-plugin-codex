@@ -6,13 +6,25 @@ and therefore says nothing about CLI compatibility.
 
 Live gate, 0.3.0: **not run**. `npm run smoke:live-grok` has not been executed for this release, so
 nothing in this file establishes that 0.3.0 works against any Grok CLI version. It is required before
-publishing (see below), and the line recording it must name the CLI version it ran against.
+publishing (see below), and the line recording it must name the CLI version it ran against. **The
+branch may be merged in this state; it must not be published in it.**
 
 Previous dated record: 0.2.1 was verified on 2026-07-11 against Grok CLI 1.0.3 on macOS.
 
 Every release must add both lines: a dated offline line, and a dated live line naming the CLI version
 it was verified against. An offline line never substitutes for the live one, and a record without a
 date and a CLI version cannot be used to answer "did this ever work with that CLI".
+
+Both records are machine-checked, so this is a gate and not a note. `npm run validate:plugin` (part
+of `npm run check`) requires an `Offline gate, <package version>:` and a `Live gate, <package
+version>:` record with a date; with `GROK_PLUGIN_RELEASE=1` it additionally fails while the live
+record is missing, undated, still says "not run", or does not name a `Grok CLI <x.y.z>`. A record is
+recognised only when its label opens a line, so replace the record above in place, using this shape:
+
+```
+Live gate, <version>: verified <YYYY-MM-DD> — `npm run smoke:live-grok` passed against
+Grok CLI <x.y.z> on <platform>, Node <version>.
+```
 
 The everyday checks are local and deterministic. Authenticated model calls are a separate gate — kept out of `npm test` and `npm run check`, and required at release — because CLI discovery, login, model listing, and successful invocation are different facts.
 
@@ -27,7 +39,8 @@ CI runs the same gate on `ubuntu-latest` and `macos-latest`
 ([.github/workflows/pull-request-ci.yml](../.github/workflows/pull-request-ci.yml)) and fails if the
 committed bundles differ from a fresh build. Release candidates additionally run
 `GROK_PLUGIN_RELEASE=1 npm run validate:plugin`, which rejects a manifest still carrying the local
-`+codex.<cachebuster>` suffix.
+`+codex.<cachebuster>` suffix and a live record that has not been filled in for the version being
+released.
 
 `npm run check` performs:
 
@@ -54,8 +67,10 @@ npm run smoke:live-grok
 
 The live smoke uses an explicit workspace, disables web search and subagents, requests one exact sentinel, and verifies `data.finalText`. Set `GROK_SMOKE_MODEL` only when an explicit model must be tested; otherwise Grok's configured default is used.
 
-Status for 0.3.0: not run. The release is blocked on it, and its output belongs in the dated live line
-at the top of this file.
+Status for 0.3.0: not run. The release is blocked on it — `GROK_PLUGIN_RELEASE=1 npm run
+validate:plugin` fails until the live record at the top of this file is replaced — and the smoke run
+prints the record to paste there. Nothing in the repository can substitute for it: every fixture is
+hand-written, and unit tests must never call the real API.
 
 This is **required before publishing a release**, not optional. It is the only gate that observes the real Grok stream vocabulary: the 0.2.1 stop-reason regression (`EndTurn` vs `end_turn`) passed every offline gate for a month because no mandatory check ever saw a live `end` event. It stays out of `npm run check` and out of `npm test` on purpose — unit tests must never call the real API, and the account behind this plugin has repeatedly exhausted its free tier.
 

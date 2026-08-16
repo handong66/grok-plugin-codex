@@ -98,6 +98,12 @@ as `true` / `false` / `"unknown"` rather than `null`; new tool `grok_finalize`; 
   offline line for `npm run check`, and a live line naming the Grok CLI version `npm run smoke:live-grok`
   ran against. Neither substitutes for the other, and the live line for 0.3.0 is still open — the offline
   gate observes no CLI, so it cannot answer "does this work with that CLI".
+  Both records are now machine-checked rather than merely stated: `npm run validate:plugin` requires a
+  dated record of each kind for the version in `package.json`, and with `GROK_PLUGIN_RELEASE=1` it fails
+  while the live record is missing, undated, still "not run", or naming no `Grok CLI <x.y.z>`. **0.3.0
+  therefore cannot be published as it stands** — the branch is mergeable, and the release build stays red
+  until the live smoke has run and its record replaces the open one. `npm run smoke:live-grok` prints the
+  record to paste on success.
   Tool descriptions state the typical wall time per kind (continue ~62 s, run ~129 s,
   review ~171 s, adversarial_review ~223 s median) and say not to cancel before `timeoutMs` unless
   `waitingForAuth` is set or the event counters have not moved for 45 s — 26 of 43 recorded cancels

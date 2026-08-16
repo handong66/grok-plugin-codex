@@ -2,9 +2,11 @@
 import { Client } from "@modelcontextprotocol/sdk/client/index.js";
 import { StdioClientTransport } from "@modelcontextprotocol/sdk/client/stdio.js";
 import { ListRootsRequestSchema } from "@modelcontextprotocol/sdk/types.js";
+import { readFileSync } from "node:fs";
 import { pathToFileURL } from "node:url";
 
 const sentinel = "GROK_PLUGIN_CODEX_OK";
+const { version } = JSON.parse(readFileSync(new URL("../package.json", import.meta.url), "utf8"));
 
 const transport = new StdioClientTransport({
   command: "node",
@@ -20,7 +22,7 @@ transport.stderr?.on("data", (chunk) => {
 });
 
 const client = new Client(
-  { name: "grok-plugin-codex-live-smoke", version: "0.2.1" },
+  { name: "grok-plugin-codex-live-smoke", version },
   { capabilities: { roots: {} } }
 );
 client.setRequestHandler(ListRootsRequestSchema, async () => ({
@@ -57,6 +59,14 @@ try {
     throw new Error(`Expected exact ${sentinel}, got: ${String(text).trim()}`);
   }
   console.log(`Live Grok smoke passed: ${sentinel}`);
+  // A pass that nobody records cannot answer "did this ever work with that CLI", and the release
+  // gate in validate-plugin.mjs reads exactly this record. `grok --version` names the CLI.
+  const today = new Date().toISOString().slice(0, 10);
+  console.log(
+    `Record it in docs/verification.md, replacing the "Live gate, ${version}:" record:\n` +
+      `Live gate, ${version}: verified ${today} — \`npm run smoke:live-grok\` passed against ` +
+      `Grok CLI <x.y.z> on <platform>, Node ${process.version}.`
+  );
 } finally {
   await client.close();
   if (stderr.trim()) process.stderr.write(stderr);

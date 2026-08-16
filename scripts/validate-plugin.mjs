@@ -1,6 +1,7 @@
 #!/usr/bin/env node
 import { existsSync, readFileSync } from "node:fs";
 import { join, resolve } from "node:path";
+import { checkVerificationRecords } from "./lib/verification-gate.mjs";
 
 const repoRoot = resolve(".");
 const root = resolve("plugins/grok-plugin-codex");
@@ -16,6 +17,7 @@ const privacyPath = join(repoRoot, "docs", "privacy.md");
 const termsPath = join(repoRoot, "docs", "terms.md");
 const securityPath = join(repoRoot, "SECURITY.md");
 const contributingPath = join(repoRoot, "CONTRIBUTING.md");
+const verificationPath = join(repoRoot, "docs", "verification.md");
 const errors = [];
 
 function readJson(path) {
@@ -45,7 +47,8 @@ for (const path of [
   privacyPath,
   termsPath,
   securityPath,
-  contributingPath
+  contributingPath,
+  verificationPath
 ]) {
   if (!existsSync(path)) errors.push(`missing ${path}`);
 }
@@ -74,6 +77,16 @@ if (
 if (process.env.GROK_PLUGIN_RELEASE === "1" && String(manifest.version).includes("+codex.")) {
   errors.push("release builds must not publish a +codex.<cachebuster> manifest version");
 }
+// X8 / GPC-01.6: the live gate is required before publishing, so the release build refuses to pass
+// while docs/verification.md has no dated live record — naming the CLI version — for this version.
+// The offline gate observes no Grok CLI and can never substitute for it.
+errors.push(
+  ...checkVerificationRecords(
+    existsSync(verificationPath) ? readFileSync(verificationPath, "utf8") : "",
+    String(packageJson.version ?? ""),
+    { release: process.env.GROK_PLUGIN_RELEASE === "1" }
+  )
+);
 const serverSource = existsSync(serverSourcePath) ? readFileSync(serverSourcePath, "utf8") : "";
 // GPC-10.2: the MCP server version is injected at build time, so the source must not carry a literal
 // and the built bundle must carry exactly the package version.
