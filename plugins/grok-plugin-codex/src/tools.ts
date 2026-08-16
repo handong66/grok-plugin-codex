@@ -399,26 +399,52 @@ async function runOrStartJob(params: CommonArgs & {
       // GPC-M2: `grok_continue` used the mutable execution shape and never set readOnly, so a session
       // created under enforced `--permission-mode plan` could be resumed with full write permissions —
       // observed once against a real adversarial-review session, and with `--always-approve` twice.
-      const origin = params.sessionId ? await store.findSessionOrigin(params.sessionId) : undefined;
+      // `continueLatest` names no session, so it skipped that lookup completely; the session this
+      // plugin started most recently in this workspace is the evidence it has about what the CLI will
+      // resume, and it is used to fail closed rather than to leave the parameter unguarded.
+      const inferredTarget = !params.sessionId;
+      const origin: { jobId: string; kind: JobKind; readOnly: boolean; grokSessionId?: string } | undefined =
+        params.sessionId
+          ? await store.findSessionOrigin(params.sessionId)
+          : await store.findLatestSessionOrigin(cwd);
+      const originSessionId = params.sessionId ?? origin?.grokSessionId;
       if (origin?.readOnly) {
         if (params.alwaysApprove === true) {
           throw new GrokPluginError(
             "readonly_session_escalation",
-            "This Grok session was created by an enforced read-only job, so it cannot be continued with " +
-              "alwaysApprove. Start a new mutable session instead of escalating a read-only one.",
+            inferredTarget
+              ? `The most recent Grok session this plugin started in this workspace (${originSessionId}) came ` +
+                `from an enforced read-only ${origin.kind} job, and continueLatest cannot name a different ` +
+                "one, so alwaysApprove is refused. Pass the sessionId of a mutable session, or start a new one."
+              : "This Grok session was created by an enforced read-only job, so it cannot be continued with " +
+                "alwaysApprove. Start a new mutable session instead of escalating a read-only one.",
             false,
-            { sessionId: params.sessionId, originJobId: origin.jobId, originKind: origin.kind }
+            {
+              sessionId: originSessionId,
+              originJobId: origin.jobId,
+              originKind: origin.kind,
+              inferredFromLatestJob: inferredTarget
+            }
           );
         }
         readOnly = true;
         inheritedWarnings.push(
-          `Session ${params.sessionId} was created by a read-only ${origin.kind} job; this continuation ` +
-            "inherits enforced plan mode without subagents."
+          inferredTarget
+            ? `continueLatest resumes the Grok CLI's most recent session; the most recent one this plugin ` +
+              `started here (${originSessionId}) came from a read-only ${origin.kind} job, so this ` +
+              "continuation inherits enforced plan mode without subagents. Pass an explicit sessionId to " +
+              "continue a different session."
+            : `Session ${params.sessionId} was created by a read-only ${origin.kind} job; this continuation ` +
+              "inherits enforced plan mode without subagents."
         );
       } else if (!origin) {
         inheritedWarnings.push(
-          "This plugin has no record of the continued session, so its original read-only mode could not be " +
-            "verified; the continuation runs with the permissions given in this call."
+          inferredTarget
+            ? "This plugin started no session in this workspace, so the read-only mode of the session " +
+              "continueLatest will resume could not be verified; the continuation runs with the permissions " +
+              "given in this call."
+            : "This plugin has no record of the continued session, so its original read-only mode could not be " +
+              "verified; the continuation runs with the permissions given in this call."
         );
       }
     }

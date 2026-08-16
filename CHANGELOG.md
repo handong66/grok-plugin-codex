@@ -26,7 +26,14 @@ All notable user-visible and contract changes to `grok-plugin-codex`.
   this plugin created for a review, adversarial review, or rescue is now resumed in enforced read-only mode,
   and `alwaysApprove` on such a session is refused with the non-retryable `readonly_session_escalation`
   before any Grok process starts. When the session is unknown to the plugin the call proceeds with a warning
-  saying the original mode could not be verified. Job records carry `readOnly` for this lookup.
+  saying the original mode could not be verified. Job records carry `readOnly` for this lookup; a record
+  written before that field existed (the retained 0.2.x jobs are exactly the ones holding session ids today)
+  is read as read-only when its `kind` is `review`, `adversarial_review`, or `rescue`. `continueLatest: true`
+  names no session and so skipped the lookup entirely; it now resolves the newest session this plugin started
+  in the same workspace and fails closed on it — `alwaysApprove` is refused with
+  `error.details.inferredFromLatestJob: true`, and the inherited plan mode says in a warning that an explicit
+  `sessionId` is the way to continue a different session. A session known only from continuations stays
+  "unverified" rather than becoming "known mutable".
 
 - **GPC-01 — stop-reason vocabulary (contract).** Completion detection compared `stopReason` against the exact
   strings `"EndTurn"` / `"Cancelled"`, but Grok 1.0.x emits `end_turn` / `cancelled`, so `resultComplete` was

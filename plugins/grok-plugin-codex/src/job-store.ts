@@ -39,7 +39,20 @@ const TERMINAL_STATUSES = new Set<JobRecord["status"]>(["succeeded", "failed", "
 const JOB_ID_PATTERN = /^job_[A-Za-z0-9_-]{16,128}$/;
 const PROMPT_SOURCE_ARGS = new Set(["-p", "--single", "--prompt-file", "--prompt-json"]);
 const STATE_MARKER_CONTENT = "grok-plugin-codex-state-v2\n";
+/** The kinds this plugin has always started with `--permission-mode plan --no-subagents`. */
+const READ_ONLY_KINDS = new Set<JobKind>(["review", "adversarial_review", "rescue"]);
 const execFileAsync = promisify(execFile);
+
+/**
+ * GPC-M2: `readOnly` is new in 0.3.0, so every record written before it — including the retained
+ * seven days of jobs that actually carry a `grokSessionId` — has the field absent. Reading a missing
+ * field as `false` would resolve a real adversarial-review session to a mutable origin and skip both
+ * the inheritance and the "could not be verified" warning, which is the one case the item exists for.
+ * The record still names its `kind`, and the kind is what decided the flags in the first place.
+ */
+function recordWasReadOnly(record: JobRecord): boolean {
+  return record.readOnly ?? READ_ONLY_KINDS.has(record.kind);
+}
 
 export function defaultJobStateDir(env: NodeJS.ProcessEnv = process.env): string {
   if (env.GROK_PLUGIN_STATE_DIR) return resolve(env.GROK_PLUGIN_STATE_DIR);
@@ -503,22 +516,62 @@ export class JobStore {
   ): Promise<{ jobId: string; kind: JobKind; readOnly: boolean } | undefined> {
     await this.ensure();
     const entries = await readdir(this.jobsDir(), { withFileTypes: true }).catch(() => []);
-    let origin: { jobId: string; kind: JobKind; readOnly: boolean; createdAt: number } | undefined;
+    let creator: { jobId: string; kind: JobKind; createdAt: number } | undefined;
+    let earliest: { jobId: string; kind: JobKind; createdAt: number } | undefined;
+    let readOnly = false;
     for (const entry of entries) {
       if (!entry.isFile() || !entry.name.endsWith(".json")) continue;
       const jobId = entry.name.slice(0, -5);
       if (!JOB_ID_PATTERN.test(jobId)) continue;
       const record = await this.read(jobId).catch(() => null);
       if (!record || record.grokSessionId !== grokSessionId) continue;
-      const createdAt = Date.parse(record.createdAt);
-      const readOnly = Boolean(record.readOnly) || Boolean(origin?.readOnly);
-      if (!origin || !Number.isFinite(origin.createdAt) || createdAt <= origin.createdAt) {
-        origin = { jobId, kind: record.kind, readOnly, createdAt };
-      } else {
-        origin = { ...origin, readOnly };
+      readOnly ||= recordWasReadOnly(record);
+      const candidate = { jobId, kind: record.kind, createdAt: Date.parse(record.createdAt) };
+      if (!earliest || !Number.isFinite(earliest.createdAt) || candidate.createdAt <= earliest.createdAt) {
+        earliest = candidate;
+      }
+      // Only a job that started the session says how it was created. A `continue` job takes its mode
+      // from this same lookup, so accepting one as the origin would let a single unverified
+      // continuation launder an unknown session into a "known mutable" one for every later call.
+      if (record.kind === "continue") continue;
+      if (!creator || !Number.isFinite(creator.createdAt) || candidate.createdAt <= creator.createdAt) {
+        creator = candidate;
       }
     }
-    return origin ? { jobId: origin.jobId, kind: origin.kind, readOnly: origin.readOnly } : undefined;
+    const origin = creator ?? (readOnly ? earliest : undefined);
+    return origin ? { jobId: origin.jobId, kind: origin.kind, readOnly } : undefined;
+  }
+
+  /**
+   * GPC-M2: `continueLatest: true` names no session, so `findSessionOrigin` cannot run and the
+   * read-only inheritance was skipped entirely — `alwaysApprove` was one parameter away from
+   * resuming an enforced read-only session with write permissions. The plugin does hold cheap
+   * evidence about what the CLI is about to resume: the session it started most recently in this
+   * workspace. That is a heuristic, not a fact, so it is used to fail closed and it says so; naming
+   * an explicit `sessionId` remains the way to continue some other session.
+   */
+  async findLatestSessionOrigin(
+    cwd: string
+  ): Promise<{ jobId: string; kind: JobKind; readOnly: boolean; grokSessionId: string } | undefined> {
+    await this.ensure();
+    const workspace = resolve(cwd);
+    const entries = await readdir(this.jobsDir(), { withFileTypes: true }).catch(() => []);
+    let latest: { grokSessionId: string; createdAt: number } | undefined;
+    for (const entry of entries) {
+      if (!entry.isFile() || !entry.name.endsWith(".json")) continue;
+      const jobId = entry.name.slice(0, -5);
+      if (!JOB_ID_PATTERN.test(jobId)) continue;
+      const record = await this.read(jobId).catch(() => null);
+      if (!record?.grokSessionId || resolve(record.cwd) !== workspace) continue;
+      const createdAt = Date.parse(record.createdAt);
+      if (!latest || !Number.isFinite(latest.createdAt) || createdAt >= latest.createdAt) {
+        latest = { grokSessionId: record.grokSessionId, createdAt };
+      }
+    }
+    if (!latest) return undefined;
+    // Resolve through the session lookup so "any job on this session was read-only" still holds.
+    const origin = await this.findSessionOrigin(latest.grokSessionId);
+    return origin ? { ...origin, grokSessionId: latest.grokSessionId } : undefined;
   }
 
   async startGrokJob(params: {

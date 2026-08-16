@@ -1,4 +1,4 @@
-import { access, readFile, readdir } from "node:fs/promises";
+import { access, readFile, readdir, writeFile } from "node:fs/promises";
 import { join } from "node:path";
 import { describe, expect, it } from "vitest";
 import { grokContinue, grokReview, grokRun } from "../plugins/grok-plugin-codex/src/tools.js";
@@ -46,6 +46,18 @@ printf '%s\\n' '{"type":"tool_call","toolCallId":"t1","toolName":"read_file","ra
 `
   );
   return { bin, argvPath };
+}
+
+/** Rewrites the persisted job records the way 0.2.x wrote them: without the `readOnly` field. */
+async function stripReadOnlyField(stateDir: string): Promise<void> {
+  const jobsDir = join(stateDir, "jobs");
+  for (const entry of await readdir(jobsDir)) {
+    if (!entry.endsWith(".json")) continue;
+    const path = join(jobsDir, entry);
+    const record = JSON.parse(await readFile(path, "utf8")) as Record<string, unknown>;
+    delete record.readOnly;
+    await writeFile(path, `${JSON.stringify(record)}\n`, { mode: 0o600 });
+  }
 }
 
 async function sessionIdOf(stateDir: string): Promise<string> {
@@ -136,6 +148,135 @@ describe("continue inherits the read-only constraint (GPC-M2)", () => {
     expect(continued.ok).toBe(true);
     expect(resumeArgv).not.toContain("--permission-mode\nplan\n");
     expect(resumeArgv).toContain("--always-approve\n");
+  }, 40_000);
+
+  it("treats a record written before readOnly existed as read-only when its kind was read-only", async () => {
+    const dir = await tempDir();
+    const stateDir = await tempDir();
+    const review = await grokRecordingArgv(dir, "grok-review");
+    const resume = await grokRecordingArgv(dir, "grok-resume");
+
+    await withEnv({ GROK_BIN: review.bin, GROK_PLUGIN_STATE_DIR: stateDir }, () =>
+      grokReview({ cwd: dir, _workspaceRoots: [dir], target: "src/index.ts", background: false, timeoutMs: 20_000 })
+    );
+    const sessionId = await sessionIdOf(stateDir);
+    // The seven-day retention window still holds 0.2.x records, and those are exactly the ones that
+    // carry a session id today; reading their missing `readOnly` as `false` resolved a real
+    // adversarial-review session to a mutable origin, with neither inheritance nor a warning.
+    await stripReadOnlyField(stateDir);
+
+    const escalated = envelope(
+      await withEnv({ GROK_BIN: resume.bin, GROK_PLUGIN_STATE_DIR: stateDir }, () =>
+        grokContinue({ cwd: dir, _workspaceRoots: [dir], prompt: "now fix it", sessionId, alwaysApprove: true })
+      )
+    );
+    expect(escalated.ok).toBe(false);
+    expect(escalated.error.code).toBe("readonly_session_escalation");
+    await expect(access(resume.argvPath)).rejects.toMatchObject({ code: "ENOENT" });
+
+    const continued = envelope(
+      await withEnv({ GROK_BIN: resume.bin, GROK_PLUGIN_STATE_DIR: stateDir }, () =>
+        grokContinue({ cwd: dir, _workspaceRoots: [dir], prompt: "finish the review", sessionId })
+      )
+    );
+    const resumeArgv = await readFile(resume.argvPath, "utf8");
+
+    expect(continued.ok).toBe(true);
+    expect(resumeArgv).toContain("--permission-mode\nplan\n");
+    expect(resumeArgv).toContain("--no-subagents\n");
+  }, 40_000);
+
+  it("does not read a pre-0.3.0 mutable run as read-only", async () => {
+    const dir = await tempDir();
+    const stateDir = await tempDir();
+    const run = await grokRecordingArgv(dir, "grok-run");
+    const resume = await grokRecordingArgv(dir, "grok-resume");
+
+    await withEnv({ GROK_BIN: run.bin, GROK_PLUGIN_STATE_DIR: stateDir }, () =>
+      grokRun({ cwd: dir, _workspaceRoots: [dir], prompt: "mutable work", background: false, timeoutMs: 20_000 })
+    );
+    const sessionId = await sessionIdOf(stateDir);
+    await stripReadOnlyField(stateDir);
+
+    const continued = envelope(
+      await withEnv({ GROK_BIN: resume.bin, GROK_PLUGIN_STATE_DIR: stateDir }, () =>
+        grokContinue({ cwd: dir, _workspaceRoots: [dir], prompt: "keep going", sessionId, alwaysApprove: true })
+      )
+    );
+    const resumeArgv = await readFile(resume.argvPath, "utf8");
+
+    expect(continued.ok).toBe(true);
+    expect(resumeArgv).toContain("--always-approve\n");
+    expect(resumeArgv).not.toContain("--permission-mode\nplan\n");
+  }, 40_000);
+
+  it("refuses alwaysApprove on continueLatest when the newest session here was read-only", async () => {
+    const dir = await tempDir();
+    const stateDir = await tempDir();
+    const review = await grokRecordingArgv(dir, "grok-review");
+    const resume = await grokRecordingArgv(dir, "grok-resume");
+
+    await withEnv({ GROK_BIN: review.bin, GROK_PLUGIN_STATE_DIR: stateDir }, () =>
+      grokReview({ cwd: dir, _workspaceRoots: [dir], target: "src/index.ts", background: false, timeoutMs: 20_000 })
+    );
+    const sessionId = await sessionIdOf(stateDir);
+
+    const escalated = envelope(
+      await withEnv({ GROK_BIN: resume.bin, GROK_PLUGIN_STATE_DIR: stateDir }, () =>
+        grokContinue({
+          cwd: dir,
+          _workspaceRoots: [dir],
+          prompt: "now fix it",
+          continueLatest: true,
+          alwaysApprove: true
+        })
+      )
+    );
+
+    expect(escalated.ok).toBe(false);
+    expect(escalated.error.code).toBe("readonly_session_escalation");
+    expect(escalated.error.details.inferredFromLatestJob).toBe(true);
+    expect(escalated.error.details.sessionId).toBe(sessionId);
+    await expect(access(resume.argvPath)).rejects.toMatchObject({ code: "ENOENT" });
+
+    const continued = envelope(
+      await withEnv({ GROK_BIN: resume.bin, GROK_PLUGIN_STATE_DIR: stateDir }, () =>
+        grokContinue({ cwd: dir, _workspaceRoots: [dir], prompt: "finish the review", continueLatest: true })
+      )
+    );
+    const resumeArgv = await readFile(resume.argvPath, "utf8");
+
+    expect(continued.ok).toBe(true);
+    expect(resumeArgv).toContain("--permission-mode\nplan\n");
+    expect(continued.warnings.join(" ")).toContain("explicit sessionId");
+  }, 40_000);
+
+  it("leaves continueLatest alone when the newest session in this workspace was mutable", async () => {
+    const dir = await tempDir();
+    const stateDir = await tempDir();
+    const run = await grokRecordingArgv(dir, "grok-run");
+    const resume = await grokRecordingArgv(dir, "grok-resume");
+
+    await withEnv({ GROK_BIN: run.bin, GROK_PLUGIN_STATE_DIR: stateDir }, () =>
+      grokRun({ cwd: dir, _workspaceRoots: [dir], prompt: "mutable work", background: false, timeoutMs: 20_000 })
+    );
+
+    const continued = envelope(
+      await withEnv({ GROK_BIN: resume.bin, GROK_PLUGIN_STATE_DIR: stateDir }, () =>
+        grokContinue({
+          cwd: dir,
+          _workspaceRoots: [dir],
+          prompt: "keep going",
+          continueLatest: true,
+          alwaysApprove: true
+        })
+      )
+    );
+    const resumeArgv = await readFile(resume.argvPath, "utf8");
+
+    expect(continued.ok).toBe(true);
+    expect(resumeArgv).toContain("--always-approve\n");
+    expect(resumeArgv).not.toContain("--permission-mode\nplan\n");
   }, 40_000);
 
   it("warns instead of guessing when the session is unknown to this plugin", async () => {
