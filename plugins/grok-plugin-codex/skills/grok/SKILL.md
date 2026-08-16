@@ -13,7 +13,7 @@ Operate the installed `grok_*` tools according to their current schemas. Codex o
 - Configure a custom executable through trusted MCP environment variable `GROK_BIN`; never accept a binary path from a task prompt or tool argument.
 - Pass an explicit `cwd` for workspace, session, and export operations. Review and adversarial-review calls also require an explicit non-empty `target` and are forced into read-only plan mode without subagents.
 - A background start returns `data.job.id`. Call status, result, or cancel with that `jobId` only; job state is private and independent of workspace `cwd`.
-- Accept a background answer only when `data.resultComplete === true` and `data.outputTruncated === false`. Use `data.finalText`, not previews or raw log tails.
+- Accept an answer only when `data.resultComplete === true`, `data.outputTruncated === false`, and the summary reports `stopReason: "EndTurn"`. Treat `cancelled_output` and `max_turns_reached` as partial; continue the returned session or rerun with a narrower target. Use `data.finalText`, not previews or raw log tails.
 - Continue only a known `sessionId` or explicitly request the latest session. Export returns Markdown; the plugin does not write a caller-selected output file.
 
 ## Safety and recovery

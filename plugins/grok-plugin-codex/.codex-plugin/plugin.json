@@ -1,6 +1,6 @@
 {
   "name": "grok-plugin-codex",
-  "version": "0.2.0+codex.20260711001630",
+  "version": "0.2.1+codex.20260711160539",
   "description": "Operate Grok CLI on macOS/Linux through a bounded Codex MCP layer with private background state.",
   "author": {
     "name": "handong66",

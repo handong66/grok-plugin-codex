@@ -2,7 +2,7 @@
 
 `grok-plugin-codex` exposes a locally installed Grok CLI to Codex through a bundled Node/TypeScript MCP server. Codex remains responsible for scope, workspace state, verification, git, and final judgment; Grok is a bounded second surface.
 
-Version `0.2.0` is a breaking contract release. It replaces workspace-local background state with a private central worker architecture, removes caller-selected executable and export paths, requires explicit review targets, and returns typed MCP envelopes.
+Version `0.2.1` is the current bug-fix release. It requires a normal Grok `EndTurn` before reporting a complete result, exposes cancellation and turn exhaustion as typed incomplete outcomes, and avoids false-positive authentication reports. Version 0.2 introduced the private central worker architecture and typed MCP envelopes.
 
 Repository: https://github.com/handong66/grok-plugin-codex
 Write-up: https://han-dong.link/en/work/grok-plugin-codex
@@ -98,6 +98,8 @@ Start with `background: true`, save `data.job.id`, then call job tools with `job
 data.resultComplete === true
 data.outputTruncated === false
 ```
+
+Internally, completeness also requires non-empty final text and `stopReason: "EndTurn"`. A `Cancelled` end is returned as `cancelled_output`; `max_turns_reached` asks the caller to narrow the target or increase `maxTurns`. Both preserve bounded recovery metadata without promoting partial text to a conclusion.
 
 Use `data.finalText`. Raw tails and partial states are diagnostics only. Terminal job artifacts are retained for seven days and cleaned opportunistically.
 

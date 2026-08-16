@@ -21,7 +21,7 @@ import {
 } from "./tools.js";
 
 const server = new McpServer(
-  { name: "grok-plugin-codex", version: "0.2.0" },
+  { name: "grok-plugin-codex", version: "0.2.1" },
   {
     instructions:
       "Use these tools to operate Grok CLI without transferring hidden Codex context, secrets, system/developer messages, tool output, or private runtime paths. Codex owns scope, verification, git, and final judgment."

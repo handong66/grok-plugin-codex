@@ -59,11 +59,13 @@ Streaming lines may contain non-JSON diagnostics. The parser accepts JSON events
 
 1. process status `succeeded`;
 2. non-empty text;
-3. an `end` event;
+3. an `end` event with `stopReason: "EndTurn"`;
 4. no structured stream error;
 5. no output truncation.
 
 Only then is `resultComplete` true. Codex still verifies the result against real workspace files.
+
+An end event with `stopReason: "Cancelled"` remains `cancelled_partial` and foreground tools return `cancelled_output`. A `max_turns_reached` stream event is a typed retryable failure; callers should narrow the target or increase `maxTurns`. Both paths retain the Grok session ID, request ID, stop reason, bounded stderr, and partial text for diagnosis or continuation.
 
 ## Local upgrade loop
 

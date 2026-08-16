@@ -276,7 +276,9 @@ export async function runGrok(
 export function parseModelsOutput(raw: string): GrokModelsSummary {
   const lines = raw.split(/\r?\n/);
   const lower = raw.toLowerCase();
-  const loggedIn = !/(not logged in|login required|please log in|authentication required|unauthorized)/i.test(raw);
+  const hasPositiveAuthentication = /\b(?:you are )?logged in(?:\s+with\b|\b)/i.test(raw);
+  const hasNegativeAuthentication = /\b(?:not logged in|not authenticated|login required|please log in|authentication required|unauthorized)\b/i.test(raw);
+  const loggedIn = hasPositiveAuthentication && !hasNegativeAuthentication;
   const authMessage = lines.find((line) => /logged in|not logged in|login|required|auth/i.test(line.trim()));
   const defaultModel = lines
     .map((line) => line.match(/^\s*Default model:\s*(.+?)\s*$/i)?.[1]?.trim())
@@ -305,6 +307,7 @@ export function classifyGrokFailure(result: ProcessResult): string {
 
 export function classifyGrokErrorText(textValue: string, result?: Pick<ProcessResult, "signal" | "exitCode">): string {
   const text = textValue.toLowerCase();
+  if (text.includes("max_turns_reached") || text.includes("max turns reached")) return "max_turns_reached";
   if (
     text.includes("402 payment required") ||
     text.includes("balance exhausted") ||
@@ -314,7 +317,16 @@ export function classifyGrokErrorText(textValue: string, result?: Pick<ProcessRe
     return "quota_exhausted";
   }
   if (text.includes("429") || text.includes("rate limit")) return "rate_limited";
-  if (text.includes("not logged in") || text.includes("login") || text.includes("unauthorized") || text.includes("forbidden")) {
+  if (
+    text.includes("not logged in") ||
+    text.includes("not authenticated") ||
+    text.includes("login required") ||
+    text.includes("log in required") ||
+    text.includes("please log in") ||
+    text.includes("authentication required") ||
+    text.includes("unauthorized") ||
+    text.includes("forbidden")
+  ) {
     return "auth_required";
   }
   if (text.includes("session") && (text.includes("not found") || text.includes("does not exist"))) return "session_not_found";
@@ -332,7 +344,7 @@ export function classifyGrokErrorText(textValue: string, result?: Pick<ProcessRe
 }
 
 export function isRetryableGrokFailure(code: string): boolean {
-  return ["network_error", "rate_limited", "timeout", "terminated", "grok_failed", "unknown"].includes(code);
+  return ["network_error", "rate_limited", "timeout", "terminated", "max_turns_reached", "grok_failed", "unknown"].includes(code);
 }
 
 export function grokFailureMessage(code: string): string {
@@ -353,6 +365,8 @@ export function grokFailureMessage(code: string): string {
       return "Grok could not reach its service. Check network, proxy, and certificate configuration before retrying.";
     case "unsupported_reasoning_effort":
       return "The selected Grok model does not support reasoning effort. Remove that option or choose a compatible model.";
+    case "max_turns_reached":
+      return "Grok reached the configured turn limit before producing a final result. Narrow the target or increase maxTurns before retrying.";
     case "terminated":
       return "Grok was terminated before producing a final result.";
     default:
