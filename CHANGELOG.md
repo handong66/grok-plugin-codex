@@ -72,6 +72,18 @@ All notable user-visible and contract changes to `grok-plugin-codex`.
 
 ### Added
 
+- **GPC-11 — sibling-plugin field name accepted (contract).** The recorded schema failure was
+  `expected string, received undefined`: the field was missing, because one script fanned the same
+  review out to two sibling plugins and used the opencode plugin's name, `prompt`, for both.
+  `grok_review` and `grok_adversarial_review` now accept **`target` or `prompt`**, and `grok_rescue`
+  **`problem` or `prompt`** — exactly one, enforced in the handler as the typed `target_required`
+  (both fields are optional in the schema, so `cwd` is now the only required field on those three
+  tools). A string array is joined into a bulleted block, with the length limit applied after the
+  join. Both descriptions name the sibling plugin's spelling.
+- **GK9(b) — `Review ` was prefixed unconditionally.** A target that already began with "Review"
+  produced `Review Review the current working tree diff…`. The three read-only prompts now end with a
+  `Target:` / `Problem:` block, the same shape `grok_adversarial_review` already used.
+
 - **GK4 — `grok_finalize`, the recovery that worked, as one call.** "Stop using tools and answer now"
   was the most effective recovery in the recorded window (21 of 26 `--max-turns 1|2` jobs succeeded,
   none hit the turn limit), yet 71 of 196 observed `grok_continue` prompts reinvented it in their own

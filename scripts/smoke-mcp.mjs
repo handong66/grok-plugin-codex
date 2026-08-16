@@ -75,10 +75,11 @@ const expectedSchemas = {
       "maxTurns",
       "model",
       "problem",
+      "prompt",
       "reasoningEffort",
       "timeoutMs"
     ],
-    required: ["cwd", "problem"]
+    required: ["cwd"]
   },
   grok_review: {
     properties: [
@@ -88,11 +89,12 @@ const expectedSchemas = {
       "disableWebSearch",
       "maxTurns",
       "model",
+      "prompt",
       "reasoningEffort",
       "target",
       "timeoutMs"
     ],
-    required: ["cwd", "target"]
+    required: ["cwd"]
   },
   grok_adversarial_review: {
     properties: [
@@ -102,11 +104,12 @@ const expectedSchemas = {
       "disableWebSearch",
       "maxTurns",
       "model",
+      "prompt",
       "reasoningEffort",
       "target",
       "timeoutMs"
     ],
-    required: ["cwd", "target"]
+    required: ["cwd"]
   },
   grok_finalize: {
     properties: ["background", "cwd", "jobId", "model", "sessionId", "timeoutMs"],
@@ -197,12 +200,24 @@ try {
   }
 
   const protocolError = await client.callTool(
-    { name: "grok_review", arguments: { cwd: process.cwd() } },
+    { name: "grok_review", arguments: { cwd: process.cwd(), target: 42 } },
     undefined,
     { timeout: 5_000 }
   );
   if (!protocolError.isError || !String(protocolError.content?.[0]?.text ?? "").includes("Input validation error")) {
     throw new Error(`Missing MCP input validation error for grok_review.target: ${JSON.stringify(protocolError)}`);
+  }
+
+  // GPC-11: target and prompt are both optional in the schema, so "exactly one of them" is enforced
+  // in the handler and must come back as a typed business error, not as a schema error.
+  const aliasError = await client.callTool(
+    { name: "grok_review", arguments: { cwd: process.cwd() } },
+    undefined,
+    { timeout: 5_000 }
+  );
+  const aliasEnvelope = JSON.parse(aliasError.content?.[0]?.text ?? "{}");
+  if (!aliasError.isError || aliasEnvelope.error?.code !== "target_required") {
+    throw new Error(`Missing target_required business error for grok_review: ${JSON.stringify(aliasError)}`);
   }
 
   const businessError = await client.callTool(

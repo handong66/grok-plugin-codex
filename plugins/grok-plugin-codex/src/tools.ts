@@ -916,7 +916,57 @@ export function buildReadOnlyPreamble(options: { kind: JobKind; maxTurns?: numbe
   ];
 }
 
-export async function grokRescue(args: CommonArgs & { problem: string }) {
+/**
+ * GPC-11: the recorded schema failure was `"expected": "string" … "received": "undefined"` — the
+ * field was **missing**, because Codex fanned the same review out to two sibling plugins in one
+ * script and used the opencode plugin's field name (`prompt:`) for both. The long-term fix is one
+ * field name across the two plugins; until then both spellings are accepted. An array is joined into
+ * a bulleted block, which is a convenience, not the cause.
+ */
+export type TargetLike = string | string[];
+
+function joinTargetLike(value: TargetLike): string {
+  return Array.isArray(value) ? value.map((entry) => `- ${entry}`).join("\n") : value;
+}
+
+export function resolveTargetAlias(
+  primaryName: "target" | "problem",
+  primary: TargetLike | undefined,
+  alias: TargetLike | undefined,
+  maxChars: number
+): string {
+  const provided = [primary, alias].filter((value) => value !== undefined);
+  if (provided.length !== 1) {
+    throw new GrokPluginError(
+      "target_required",
+      `Pass exactly one of ${primaryName} or prompt. The sibling opencode plugin calls this field ` +
+        `prompt; this plugin calls it ${primaryName} and accepts both, but not both at once.`,
+      false,
+      { expected: [primaryName, "prompt"], received: provided.length }
+    );
+  }
+  const joined = joinTargetLike(provided[0] as TargetLike).trim();
+  if (!joined) {
+    throw new GrokPluginError("target_required", `${primaryName} must not be empty.`, false);
+  }
+  if (joined.length > maxChars) {
+    throw new GrokPluginError(
+      "target_too_large",
+      `${primaryName} is ${joined.length} characters after joining; the limit is ${maxChars}.`,
+      false,
+      { chars: joined.length, maxChars }
+    );
+  }
+  return joined;
+}
+
+export async function grokRescue(args: CommonArgs & { problem?: TargetLike; prompt?: TargetLike }) {
+  let problem: string;
+  try {
+    problem = resolveTargetAlias("problem", args.problem, args.prompt, 250_000);
+  } catch (error) {
+    return failure(error);
+  }
   const prompt = [
     ...buildReadOnlyPreamble({ kind: "rescue", maxTurns: args.maxTurns, timeoutMs: args.timeoutMs }),
     "You are Grok acting as an independent rescue reviewer for a Codex task.",
@@ -924,36 +974,55 @@ export async function grokRescue(args: CommonArgs & { problem: string }) {
     "Do not read Codex private runtime directories.",
     "Return: Diagnosis, Minimal path forward, Commands to verify, Risks.",
     "",
-    args.problem
+    "Problem:",
+    problem
   ].join("\n");
   return await runOrStartJob({ ...args, kind: "rescue", prompt, readOnly: true });
 }
 
-export async function grokReview(args: CommonArgs & { target: string }) {
+export async function grokReview(args: CommonArgs & { target?: TargetLike; prompt?: TargetLike }) {
+  let target: string;
+  try {
+    target = resolveTargetAlias("target", args.target, args.prompt, 16_384);
+  } catch (error) {
+    return failure(error);
+  }
   const prompt = [
     ...buildReadOnlyPreamble({ kind: "review", maxTurns: args.maxTurns, timeoutMs: args.timeoutMs }),
     "You are Grok acting as a bounded second reviewer for Codex.",
-    `Review only this explicit target: ${args.target}`,
+    "Review only the explicit target below; do not expand past it.",
     "Stay read-only. Do not edit files, commit, push, deploy, or run destructive commands.",
     "Do not spawn subagents or expand into a broad security scan.",
     "Every finding must carry exact file:line evidence; drop any claim you cannot anchor that way.",
     "If you conclude the target is acceptable, list exactly what you read or ran to reach that conclusion.",
-    "Return Findings first with exact file:line evidence, then Open questions and Test gaps."
+    "Return Findings first with exact file:line evidence, then Open questions and Test gaps.",
+    "",
+    "Target:",
+    target
   ].join("\n");
   return await runOrStartJob({ ...args, kind: "review", prompt, readOnly: true });
 }
 
-export async function grokAdversarialReview(args: CommonArgs & { target: string }) {
+export async function grokAdversarialReview(args: CommonArgs & { target?: TargetLike; prompt?: TargetLike }) {
+  let target: string;
+  try {
+    target = resolveTargetAlias("target", args.target, args.prompt, 16_384);
+  } catch (error) {
+    return failure(error);
+  }
   const prompt = [
     ...buildReadOnlyPreamble({ kind: "adversarial_review", maxTurns: args.maxTurns, timeoutMs: args.timeoutMs }),
     "You are Grok acting as a bounded failure-mode reviewer for Codex.",
-    `Inspect only this explicit target: ${args.target}`,
+    "Inspect only the explicit target below; do not expand past it.",
     "Stay read-only. Do not edit files, commit, push, deploy, or run destructive commands.",
     "Do not spawn subagents or perform repo-wide discovery unless the target is explicitly repo-wide.",
     "Report every finding you have, sorted by severity, and mark the first 5 as primary; never silently drop the rest.",
     "Every finding must carry exact file:line evidence; drop any claim you cannot anchor that way.",
     "If you conclude the target is acceptable, list exactly what you read or ran to reach that conclusion.",
-    "Return the findings, then Highest-risk assumption, Recommended verification, and Scope not inspected."
+    "Return the findings, then Highest-risk assumption, Recommended verification, and Scope not inspected.",
+    "",
+    "Target:",
+    target
   ].join("\n");
   return await runOrStartJob({ ...args, kind: "adversarial_review", prompt, readOnly: true });
 }

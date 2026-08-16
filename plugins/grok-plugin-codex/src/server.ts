@@ -87,6 +87,12 @@ const timeoutSchema = z
   );
 const jobIdSchema = z.string().min(20).max(132).regex(/^job_[A-Za-z0-9_-]+$/);
 
+const targetLike = z.union([z.string().trim().min(1).max(16_384), z.array(z.string().trim().min(1)).min(1).max(200)]);
+const problemLike = z.union([z.string().trim().min(1).max(250_000), z.array(z.string().trim().min(1)).min(1).max(200)]);
+const aliasNote =
+  "The sibling opencode plugin calls this field prompt; both spellings are accepted here, but pass " +
+  "exactly one. A string array is joined into a bulleted block.";
+
 const backgroundSchema = z
   .boolean()
   .optional()
@@ -230,7 +236,11 @@ server.registerTool(
   {
     title: "Grok Rescue",
     description: "Ask Grok for an independent, enforced read-only diagnosis.",
-    inputSchema: { ...executionShape, problem: z.string().min(1).max(250_000) },
+    inputSchema: {
+      ...executionShape,
+      problem: problemLike.optional().describe(`What went wrong and what was already tried. ${aliasNote}`),
+      prompt: problemLike.optional().describe("Alias for problem, accepted for sibling-plugin compatibility.")
+    },
     outputSchema
   },
   (args, extra) => grokRescue(withCodexWorkspaceRoots(args, extra._meta))
@@ -240,8 +250,15 @@ server.registerTool(
   "grok_review",
   {
     title: "Grok Review",
-    description: "Run an enforced read-only review of one explicit target.",
-    inputSchema: { ...executionShape, target: z.string().trim().min(1).max(16_384) },
+    description:
+      "Run an enforced read-only review of one explicit target. Inline the evidence (diff, file excerpts, " +
+      "command output) into the target: plan mode refuses shell execution, so the delegate cannot produce " +
+      "it. Typical wall time on this machine: review ~171s median.",
+    inputSchema: {
+      ...executionShape,
+      target: targetLike.optional().describe(`The explicit review target. ${aliasNote}`),
+      prompt: targetLike.optional().describe("Alias for target, accepted for sibling-plugin compatibility.")
+    },
     outputSchema
   },
   (args, extra) => grokReview(withCodexWorkspaceRoots(args, extra._meta))
@@ -251,8 +268,15 @@ server.registerTool(
   "grok_adversarial_review",
   {
     title: "Grok Adversarial Review",
-    description: "Run an enforced read-only failure-mode review of one explicit target.",
-    inputSchema: { ...executionShape, target: z.string().trim().min(1).max(16_384) },
+    description:
+      "Run an enforced read-only failure-mode review of one explicit target. Inline the evidence into the " +
+      "target: plan mode refuses shell execution. Typical wall time on this machine: " +
+      "adversarial_review ~223s median.",
+    inputSchema: {
+      ...executionShape,
+      target: targetLike.optional().describe(`The explicit review target. ${aliasNote}`),
+      prompt: targetLike.optional().describe("Alias for target, accepted for sibling-plugin compatibility.")
+    },
     outputSchema
   },
   (args, extra) => grokAdversarialReview(withCodexWorkspaceRoots(args, extra._meta))
