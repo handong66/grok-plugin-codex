@@ -138,8 +138,16 @@ export function budgetNotice(options: { maxTurns?: number; timeoutMs: number }):
   return lines;
 }
 
-/** Warn-only, never clamp: the plugin says what the data shows and runs what the caller asked for. */
-function budgetWarnings(params: { timeoutMs?: number; maxTurns?: number; promptChars: number }): string[] {
+/**
+ * Warn-only, never clamp: the plugin says what the data shows and runs what the caller asked for.
+ *
+ * FINAL Review M12: the size threshold is about how much the *caller inlined*, so it counts the
+ * caller's target — not the whole prompt. Measuring the prompt charged every review roughly 1.5k
+ * characters of plugin-authored preamble (headless preface, read-only rules, evidence and budget
+ * instructions) against an 8k budget the caller never spent, so a target of 6.6k triggered a warning
+ * telling the caller to inline less.
+ */
+function budgetWarnings(params: { timeoutMs?: number; maxTurns?: number; targetChars: number }): string[] {
   const warnings: string[] = [];
   if (params.timeoutMs !== undefined && params.timeoutMs < LOW_BUDGET_WARN_MS) {
     warnings.push(
@@ -151,9 +159,9 @@ function budgetWarnings(params: { timeoutMs?: number; maxTurns?: number; promptC
         ". The value is not clamped — it runs as given."
     );
   }
-  if (params.maxTurns !== undefined && params.maxTurns >= 3 && params.promptChars > LARGE_TARGET_CHARS) {
+  if (params.maxTurns !== undefined && params.maxTurns >= 3 && params.targetChars > LARGE_TARGET_CHARS) {
     warnings.push(
-      `maxTurns=${params.maxTurns} with a ${params.promptChars}-character target invites exploration that ` +
+      `maxTurns=${params.maxTurns} with a ${params.targetChars}-character target invites exploration that ` +
         "the budget cannot finish; recorded successes cluster at median 31s / p90 111s. Either inline less " +
         "and ask a narrower question, or expect to recover with a one-turn tool-free continuation."
     );
@@ -659,6 +667,8 @@ async function runOrStartJob(params: CommonArgs & {
   sessionId?: string;
   continueLatest?: boolean;
   readOnly?: boolean;
+  /** M12: the caller-supplied target, when `prompt` is a plugin-built wrapper around it. */
+  targetChars?: number;
 }) {
   return await guarded(async () => {
     const inheritedWarnings: string[] = [];
@@ -764,7 +774,12 @@ async function runOrStartJob(params: CommonArgs & {
     built.warnings.unshift(...inheritedWarnings);
     const timeoutMs = effectiveTimeoutMs(params.kind, params.timeoutMs);
     built.warnings.push(
-      ...budgetWarnings({ timeoutMs: params.timeoutMs, maxTurns: params.maxTurns, promptChars: params.prompt.length })
+      ...budgetWarnings({
+        timeoutMs: params.timeoutMs,
+        maxTurns: params.maxTurns,
+        // The caller's own target when the plugin wrapped one in a prompt; otherwise the prompt is it.
+        targetChars: params.targetChars ?? params.prompt.length
+      })
     );
     const background = params.background ?? BACKGROUND_DEFAULT_BY_KIND[params.kind];
     if (!background && timeoutMs > FOREGROUND_WARN_TIMEOUT_MS) {
@@ -1299,7 +1314,7 @@ export async function grokRescue(args: CommonArgs & { problem?: TargetLike; prom
     "Problem:",
     problem
   ].join("\n");
-  return await runOrStartJob({ ...args, kind: "rescue", prompt, readOnly: true });
+  return await runOrStartJob({ ...args, kind: "rescue", prompt, readOnly: true, targetChars: problem.length });
 }
 
 export async function grokReview(args: CommonArgs & { target?: TargetLike; prompt?: TargetLike }) {
@@ -1322,7 +1337,7 @@ export async function grokReview(args: CommonArgs & { target?: TargetLike; promp
     "Target:",
     target
   ].join("\n");
-  return await runOrStartJob({ ...args, kind: "review", prompt, readOnly: true });
+  return await runOrStartJob({ ...args, kind: "review", prompt, readOnly: true, targetChars: target.length });
 }
 
 /**
@@ -1363,7 +1378,7 @@ export async function grokAdversarialReview(
     "Target:",
     target
   ].join("\n");
-  return await runOrStartJob({ ...args, kind: "adversarial_review", prompt, readOnly: true });
+  return await runOrStartJob({ ...args, kind: "adversarial_review", prompt, readOnly: true, targetChars: target.length });
 }
 
 export async function grokFinalize(args: {

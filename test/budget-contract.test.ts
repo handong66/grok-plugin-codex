@@ -152,5 +152,39 @@ describe("GPC-08 warn-only budget checks", () => {
     );
 
     expect((parsed.warnings as string[]).join("\n")).toMatch(/maxTurns/);
+    expect((parsed.warnings as string[]).join("\n")).toContain("9000-character target");
+  });
+
+  /**
+   * FINAL Review M12. The threshold is about how much the caller inlined, but it was measured on the
+   * whole prompt — which the plugin itself pads with roughly 1.5k characters of headless preface,
+   * read-only rules, evidence requirements and the budget sentence. A target comfortably under the
+   * 8000-character limit therefore drew a warning telling the caller to inline less, and the number
+   * quoted back at them was not a number they had ever chosen.
+   */
+  it("measures the caller's target, not the preamble the plugin adds to it", async () => {
+    const workspace = await tempDir();
+    const stateDir = await tempDir();
+    const grokBin = await makeExecutable(join(workspace, "grok"), promptRecordingGrok(join(stateDir, "p.txt")));
+    const target = "x".repeat(7_600);
+
+    const parsed = envelope(
+      await withEnv({ GROK_BIN: grokBin, GROK_PLUGIN_STATE_DIR: stateDir }, () =>
+        grokReview({
+          cwd: workspace,
+          _workspaceRoots: [workspace],
+          background: false,
+          timeoutMs: 60_000,
+          maxTurns: 4,
+          target
+        })
+      )
+    );
+    const prompt = await readFile(join(stateDir, "p.txt"), "utf8");
+
+    // The prompt really is over the threshold; the target really is under it.
+    expect(prompt.length).toBeGreaterThan(8_000);
+    expect(target.length).toBeLessThan(8_000);
+    expect((parsed.warnings as string[]).join("\n")).not.toMatch(/invites exploration/);
   });
 });
