@@ -3,7 +3,9 @@ import { Client } from "@modelcontextprotocol/sdk/client/index.js";
 import { StdioClientTransport } from "@modelcontextprotocol/sdk/client/stdio.js";
 import { ListRootsRequestSchema } from "@modelcontextprotocol/sdk/types.js";
 import { readFileSync } from "node:fs";
+import { arch, release } from "node:os";
 import { pathToFileURL } from "node:url";
+import { formatLiveGateRecord } from "./lib/verification-gate.mjs";
 
 const sentinel = "GROK_PLUGIN_CODEX_OK";
 const { version } = JSON.parse(readFileSync(new URL("../package.json", import.meta.url), "utf8"));
@@ -60,12 +62,26 @@ try {
   }
   console.log(`Live Grok smoke passed: ${sentinel}`);
   // A pass that nobody records cannot answer "did this ever work with that CLI", and the release
-  // gate in validate-plugin.mjs reads exactly this record. `grok --version` names the CLI.
-  const today = new Date().toISOString().slice(0, 10);
+  // gate in validate-plugin.mjs reads exactly this record.
+  //
+  // X11: the CLI version comes from the plugin's own discovery — the same `grok --version` call the
+  // run above went through — rather than a second lookup that could name a different binary, and the
+  // platform comes from this process. The record used to print `<x.y.z>` / `<platform>`, which the
+  // gate's `Grok CLI \d+\.\d+\.\d+` rule rejects, so pasting it verbatim still blocked the release.
+  const check = await client.callTool(
+    { name: "grok_check", arguments: { cwd: process.cwd(), includeModels: false } },
+    undefined,
+    { timeout: 60_000 }
+  );
+  const cliVersion = JSON.parse(check.content?.[0]?.text ?? "{}").data?.version;
   console.log(
     `Record it in docs/verification.md, replacing the "Live gate, ${version}:" record:\n` +
-      `Live gate, ${version}: verified ${today} — \`npm run smoke:live-grok\` passed against ` +
-      `Grok CLI <x.y.z> on <platform>, Node ${process.version}.`
+      formatLiveGateRecord({
+        version,
+        cliVersion,
+        platform: `${process.platform} ${arch()} ${release()}`,
+        nodeVersion: process.version
+      })
   );
 } finally {
   await client.close();

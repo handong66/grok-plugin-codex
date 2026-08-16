@@ -14,6 +14,50 @@ const CLI_VERSION = /\bGrok CLI \d+\.\d+\.\d+/;
 const NOT_RUN = /\bnot run\b/i;
 
 /**
+ * X11: the record `npm run smoke:live-grok` printed for pasting still read `Grok CLI <x.y.z>` on
+ * `<platform>` — placeholders that `CLI_VERSION` above rejects by construction, so the one artefact
+ * of a successful live run could never satisfy the gate it exists to satisfy. The smoke run knows
+ * both facts (the plugin's own discovery reports the CLI version; the process reports the platform),
+ * so the record is now formatted from them.
+ *
+ * `grok --version` prints `grok 1.0.3 (1a29d5bc12d4)`: the semver is what the gate matches, and the
+ * build id is kept because two builds of 1.0.3 are not the same evidence.
+ *
+ * @param {string} raw output of `grok --version`, or the `version` field of `grok_check`
+ * @returns {string|undefined} e.g. `1.0.3 (1a29d5bc12d4)`, or undefined when no semver is present
+ */
+export function grokCliVersionLabel(raw) {
+  const text = String(raw ?? "").trim();
+  const semver = /\b(\d+\.\d+\.\d+(?:-[0-9A-Za-z.-]+)?)/.exec(text)?.[1];
+  if (!semver) return undefined;
+  const build = /\(([0-9A-Za-z._-]+)\)/.exec(text)?.[1];
+  return build ? `${semver} (${build})` : semver;
+}
+
+/**
+ * Builds the exact line `docs/verification.md` must carry, from observed values only. Throws rather
+ * than emitting a placeholder: a record that names no CLI version is the state this gate refuses,
+ * and printing one for the operator to paste would only move the failure to the next release build.
+ *
+ * @param {{ version: string, cliVersion: string, platform: string, nodeVersion: string, date?: string }} facts
+ * @returns {string}
+ */
+export function formatLiveGateRecord(facts) {
+  const cli = grokCliVersionLabel(facts.cliVersion);
+  if (!cli) {
+    throw new Error(
+      `Cannot record the live gate: the Grok CLI reported no <x.y.z> version (got ${JSON.stringify(facts.cliVersion ?? null)}). ` +
+        "Run `grok --version` and record the line by hand."
+    );
+  }
+  const date = facts.date ?? new Date().toISOString().slice(0, 10);
+  return (
+    `Live gate, ${facts.version}: verified ${date} — \`npm run smoke:live-grok\` passed against\n` +
+    `Grok CLI ${cli} on ${facts.platform}, Node ${facts.nodeVersion}.`
+  );
+}
+
+/**
  * The paragraph introduced by `<label>` — records wrap, so a single line is not the unit. The label
  * must open a line, so a mention inside a sentence or an indented example cannot pass for a record.
  */

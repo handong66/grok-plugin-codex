@@ -2,7 +2,11 @@ import { spawnSync } from "node:child_process";
 import { readFileSync } from "node:fs";
 import { fileURLToPath } from "node:url";
 import { describe, expect, it } from "vitest";
-import { checkVerificationRecords } from "../scripts/lib/verification-gate.mjs";
+import {
+  checkVerificationRecords,
+  formatLiveGateRecord,
+  grokCliVersionLabel
+} from "../scripts/lib/verification-gate.mjs";
 
 /**
  * X8 / GPC-01.6. 0.3.0 is versioned, dated and described as the current release while its own
@@ -107,5 +111,59 @@ describe("release gate on the verification record", () => {
     } else {
       expect(output).not.toMatch(/live gate/i);
     }
+  });
+});
+
+/**
+ * X11. The smoke run's whole product is a record a human pastes into docs/verification.md, and it
+ * used to print `Grok CLI <x.y.z>` on `<platform>` — which the gate above rejects by construction.
+ * The formatter is exercised with a fake `--version` string; nothing here calls the real CLI.
+ */
+describe("X11 the live-smoke record is built from observed values", () => {
+  const smokeSource = readFileSync(new URL("../scripts/live-grok-smoke.mjs", import.meta.url), "utf8");
+
+  it("names the CLI version and build id the CLI actually reported", () => {
+    expect(grokCliVersionLabel("grok 1.0.3 (1a29d5bc12d4)")).toBe("1.0.3 (1a29d5bc12d4)");
+    expect(grokCliVersionLabel("1.0.3")).toBe("1.0.3");
+    expect(grokCliVersionLabel("grok version 1.2.10\n")).toBe("1.2.10");
+    expect(grokCliVersionLabel("grok 2.0.0-beta.1 (deadbeef)")).toBe("2.0.0-beta.1 (deadbeef)");
+    expect(grokCliVersionLabel("grok (unknown build)")).toBeUndefined();
+    expect(grokCliVersionLabel(undefined)).toBeUndefined();
+  });
+
+  it("produces a record the release gate accepts", () => {
+    const record = formatLiveGateRecord({
+      version: "0.3.0",
+      cliVersion: "grok 1.0.3 (1a29d5bc12d4)",
+      platform: "darwin arm64 25.6.0",
+      nodeVersion: "v25.9.0",
+      date: "2026-08-16"
+    });
+
+    expect(record).toContain("Grok CLI 1.0.3 (1a29d5bc12d4)");
+    expect(record).toContain("on darwin arm64 25.6.0, Node v25.9.0.");
+    expect(record).not.toMatch(/<x\.y\.z>|<platform>|<version>/);
+    expect(checkVerificationRecords(doc(OFFLINE_OK, record), "0.3.0", { release: true })).toEqual([]);
+  });
+
+  it("refuses to print a record it cannot fill in, instead of emitting a placeholder", () => {
+    expect(() =>
+      formatLiveGateRecord({
+        version: "0.3.0",
+        cliVersion: "grok (unknown build)",
+        platform: "darwin arm64 25.6.0",
+        nodeVersion: "v25.9.0"
+      })
+    ).toThrow(/no <x\.y\.z> version/);
+  });
+
+  it("leaves no placeholder in the script that prints the record", () => {
+    expect(smokeSource).toContain("formatLiveGateRecord");
+    expect(smokeSource).toMatch(/process\.platform/);
+    expect(smokeSource).toMatch(/arch\(\)/);
+    expect(smokeSource).toMatch(/release\(\)/);
+    // The version is read back from the plugin's own discovery, not hard-coded or guessed.
+    expect(smokeSource).toContain("grok_check");
+    expect(smokeSource.replace(/^ \*.*$/gm, "")).not.toMatch(/Grok CLI <x\.y\.z>|on <platform>/);
   });
 });
