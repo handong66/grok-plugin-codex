@@ -70,7 +70,12 @@ export type GrokModelInfo = {
 };
 
 export type GrokModelsSummary = {
-  loggedIn: boolean;
+  /**
+   * Three-state on purpose (X8 / SPEC §B GK1.3): `true` only on positive sign-in evidence, `false`
+   * only on an explicit negative, `"unknown"` when the listing says nothing either way. A silent
+   * listing published as `false` was read as a negative auth gate.
+   */
+  loggedIn: boolean | "unknown";
   authMessage?: string;
   defaultModel?: string;
   availableModels: GrokModelInfo[];

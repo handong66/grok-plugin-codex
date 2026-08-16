@@ -383,7 +383,16 @@ export function parseModelsOutput(raw: string): GrokModelsSummary {
   const lower = raw.toLowerCase();
   const hasPositiveAuthentication = /\b(?:you are )?logged in(?:\s+with\b|\b)/i.test(raw);
   const hasNegativeAuthentication = /\b(?:not logged in|not authenticated|login required|please log in|authentication required|unauthorized)\b/i.test(raw);
-  const loggedIn = hasPositiveAuthentication && !hasNegativeAuthentication;
+  // X8 / SPEC §B GK1.3: "logged out" and "this output does not say" are different facts, and the
+  // two-state `hasPositive && !hasNegative` published the second as the first — `grok_check` wrote it
+  // straight into `authenticated`, so a successful models listing that never mentions login gated the
+  // next job as unauthenticated. Positive evidence is still the only thing that makes it `true`
+  // (SPEC.md:496, the user's own rule); silence is now `"unknown"`.
+  const loggedIn: boolean | "unknown" = hasNegativeAuthentication
+    ? false
+    : hasPositiveAuthentication
+      ? true
+      : "unknown";
   const authMessage = lines.find((line) => /logged in|not logged in|login|required|auth/i.test(line.trim()));
   const defaultModel = lines
     .map((line) => line.match(/^\s*Default model:\s*(.+?)\s*$/i)?.[1]?.trim())
@@ -449,6 +458,20 @@ const AUTH_MARKERS = [
   "grok login"
 ];
 
+/**
+ * X5: the previous rule was the bare substring `session` plus `not found` / `does not exist`, and
+ * `session_id=<uuid>` — which the CLI prints on every tool error — contains it. These are bounded
+ * phrases instead: `session\b` cannot match `session_id` (the underscore is a word character), and
+ * the recorded GK8 failure text `Failed to restore session from remote: … 404 Not Found` still does.
+ */
+const SESSION_NOT_FOUND_PATTERNS = [
+  /failed to restore session/,
+  /(?:could not|cannot|couldn.t|unable to) (?:restore|resume|find|load|open) (?:the |this )?session/,
+  /session\b[^.\n]{0,80}?\b(?:not found|does not exist|no longer exists)/,
+  /no such session/,
+  /unknown session/
+];
+
 export function classifyGrokErrorText(textValue: string, result?: Pick<ProcessResult, "signal" | "exitCode">): string {
   const text = textValue.toLowerCase();
   if (text.includes("max_turns_reached") || text.includes("max turns reached")) return "max_turns_reached";
@@ -461,13 +484,19 @@ export function classifyGrokErrorText(textValue: string, result?: Pick<ProcessRe
   if (text.includes("401") && (text.includes("unauthorized") || text.includes("authentication") || text.includes("token"))) {
     return "auth_required";
   }
-  if (text.includes("session") && (text.includes("not found") || text.includes("does not exist"))) return "session_not_found";
+  // GK9(a): a recorded run with grok-composer-2.5-fast failed with `tool_output_error` because the
+  // model could not consume its own Read output. Retrying with the same model cannot help.
+  //
+  // X5: this now runs *before* the session check. The recorded tool-error line is
+  // `ERROR tool_error: tool_output_error session_id=<uuid> tool_name="Read" …`, and the worker feeds
+  // the classifier the whole stderr — so a Read failure whose payload also said a path does not exist
+  // used to come back as a non-retryable `session_not_found`, which could then drive
+  // `grok_continue`'s fallbackToLatest onto an unrelated session.
+  if (text.includes("tool_output_error")) return "model_tool_incompatible";
+  if (SESSION_NOT_FOUND_PATTERNS.some((pattern) => pattern.test(text))) return "session_not_found";
   if (text.includes("model") && (text.includes("not found") || text.includes("unavailable") || text.includes("not authorized"))) {
     return "model_unavailable";
   }
-  // GK9(a): a recorded run with grok-composer-2.5-fast failed with `tool_output_error` because the
-  // model could not consume its own Read output. Retrying with the same model cannot help.
-  if (text.includes("tool_output_error")) return "model_tool_incompatible";
   if (text.includes("unknown argument") || text.includes("unexpected argument") || text.includes("unrecognized option")) {
     return "cli_incompatible";
   }

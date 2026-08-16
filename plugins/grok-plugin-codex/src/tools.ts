@@ -1047,7 +1047,10 @@ export async function grokCheck(args: {
     const parsed = parseModelsOutput(models.stdout || models.stderr);
     if (models.exitCode !== 0) {
       const failureCode = classifyGrokFailure(models);
-      throw new GrokPluginError(failureCode, "Grok model discovery failed.", true, {
+      // X7: the discovery tools hard-coded `retryable: true` for whatever the classifier returned, so
+      // a logged-out or quota-exhausted CLI still advertised retry — the exact advice GPC-04 removed
+      // from the execution path. The flag is the classifier's to decide, here as everywhere else.
+      throw new GrokPluginError(failureCode, "Grok model discovery failed.", isRetryableGrokFailure(failureCode), {
         ...probed,
         authenticated: parsed.loggedIn,
         entitled: failureCode.startsWith("quota_") ? false : probed.entitled,
@@ -1085,7 +1088,9 @@ export async function grokModels(args: { cwd?: string; timeoutMs?: number; _work
       timeoutMs: args.timeoutMs ?? DEFAULT_DISCOVERY_TIMEOUT_MS
     });
     if (result.exitCode !== 0) {
-      throw new GrokPluginError(classifyGrokFailure(result), "Grok model discovery failed.", true, {
+      // X7: see grokCheck — auth and quota failures must not advertise retry on the discovery path.
+      const failureCode = classifyGrokFailure(result);
+      throw new GrokPluginError(failureCode, "Grok model discovery failed.", isRetryableGrokFailure(failureCode), {
         exitCode: result.exitCode
       });
     }
@@ -1362,7 +1367,9 @@ export async function grokSessions(args: { cwd: string; timeoutMs?: number; quer
     if (args.query) commandArgs.push("--", args.query);
     const result = await runGrok(commandArgs, { cwd, timeoutMs: args.timeoutMs ?? DEFAULT_DISCOVERY_TIMEOUT_MS });
     if (result.exitCode !== 0) {
-      throw new GrokPluginError(classifyGrokFailure(result), "Grok session discovery failed.", true, {
+      // X7: same rule as the other discovery paths — the classifier owns `retryable`.
+      const failureCode = classifyGrokFailure(result);
+      throw new GrokPluginError(failureCode, "Grok session discovery failed.", isRetryableGrokFailure(failureCode), {
         exitCode: result.exitCode
       });
     }
@@ -1379,7 +1386,9 @@ export async function grokExport(args: { cwd: string; timeoutMs?: number; sessio
       timeoutMs: args.timeoutMs ?? DEFAULT_DISCOVERY_TIMEOUT_MS
     });
     if (result.exitCode !== 0) {
-      throw new GrokPluginError(classifyGrokFailure(result), "Grok session export failed.", true, {
+      // X7: same rule as the other discovery paths — the classifier owns `retryable`.
+      const failureCode = classifyGrokFailure(result);
+      throw new GrokPluginError(failureCode, "Grok session export failed.", isRetryableGrokFailure(failureCode), {
         exitCode: result.exitCode
       });
     }

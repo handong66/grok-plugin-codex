@@ -93,7 +93,53 @@ exit 7
     expect(result.isError).toBe(true);
     expect(parsed.ok).toBe(false);
     expect(parsed.error.code).toBe("auth_required");
-    expect(parsed.error.retryable).toBe(true);
+    // X7: the discovery tools used to hard-code `retryable: true`, so a caller obeying the flag
+    // looped `grok models` against a logged-out CLI. The classifier owns the flag on every path;
+    // the execution path has always reported this correctly.
+    expect(parsed.error.retryable).toBe(false);
+  });
+
+  it("does not advertise retry for a quota-exhausted discovery call", async () => {
+    const dir = await tempDir();
+    const grokBin = await makeExecutable(
+      join(dir, "grok"),
+      `#!/bin/sh
+if [ "$1" = "--version" ]; then echo "grok fake 1.0.3"; exit 0; fi
+if [ "$1" = "--help" ]; then
+  echo "--prompt-file --output-format streaming-json --permission-mode plan --no-subagents --disable-web-search"
+  exit 0
+fi
+echo "HTTP 402 Payment Required: usage balance exhausted" >&2
+exit 1
+`
+    );
+
+    const check = envelope(await withEnv({ GROK_BIN: grokBin }, () => grokCheck({ cwd: dir, ...roots(dir) })));
+    const models = envelope(await withEnv({ GROK_BIN: grokBin }, () => grokModels({ cwd: dir, ...roots(dir) })));
+
+    expect(check.error.code).toBe("quota_exhausted");
+    expect(check.error.retryable).toBe(false);
+    expect(models.error.code).toBe("quota_exhausted");
+    expect(models.error.retryable).toBe(false);
+  });
+
+  it("reports an unknown login state as \"unknown\" when the model listing never mentions login", async () => {
+    const dir = await tempDir();
+    const grokBin = await makeExecutable(
+      join(dir, "grok"),
+      fakeGrokScript({
+        modelsOutput: ["Default model: grok-4.5", "", "Available models:", "  * grok-4.5 (default)"].join("\n")
+      })
+    );
+
+    const parsed = envelope(await withEnv({ GROK_BIN: grokBin }, () => grokCheck({ cwd: dir, ...roots(dir) })));
+
+    expect(parsed.ok).toBe(true);
+    expect(parsed.data.modelsListed).toBe(true);
+    // X8 / SPEC §B GK1.3: a successful listing that is silent about login is undetermined, and
+    // publishing that silence as `false` turned it into a negative auth gate.
+    expect(parsed.data.authenticated).toBe("unknown");
+    expect(parsed.data.models.loggedIn).toBe("unknown");
   });
 
   it("grok_check does not report an explicit unauthenticated response as logged in", async () => {

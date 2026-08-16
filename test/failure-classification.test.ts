@@ -76,6 +76,28 @@ describe("quota and auth classification (GPC-04)", () => {
     expect(classifyGrokErrorText("HTTP 401 Unauthorized: token expired")).toBe("auth_required");
   });
 
+  it("does not read a tool error's session_id as a missing session (X5)", () => {
+    // The recorded stderr line. `session_id=<uuid>` contains the bare substring the old rule matched
+    // on, and the worker feeds the classifier the whole stderr — so a Read that failed on a path that
+    // does not exist came back as a non-retryable `session_not_found`, which can also drive
+    // grok_continue's fallbackToLatest onto an unrelated session.
+    const toolError =
+      'ERROR tool_error: tool_output_error session_id=019f436e-b14c-7c23-b7f4-505e81ef1f3b tool_name="Read" ' +
+      'error="File does not exist: /repo/src/missing.ts"';
+
+    expect(classifyGrokErrorText(toolError)).toBe("model_tool_incompatible");
+    expect(isRetryableGrokFailure(classifyGrokErrorText(toolError))).toBe(false);
+  });
+
+  it("still classifies the real missing-session texts as session_not_found (X5)", () => {
+    // GK8's recorded failure, plus the phrases a bounded matcher must keep.
+    expect(classifyGrokErrorText("Failed to restore session from remote: 404 Not Found")).toBe("session_not_found");
+    expect(classifyGrokErrorText("Session 01a00152-52ee-7252-9e7c-9682d567a118 not found")).toBe("session_not_found");
+    expect(classifyGrokErrorText("that session does not exist")).toBe("session_not_found");
+    // A tool payload that merely mentions a session id is not one of them.
+    expect(classifyGrokErrorText("session_id=019f436e read failed: file not found")).not.toBe("session_not_found");
+  });
+
   it("extracts only vendor error events from a stream, never the answer text", async () => {
     const fixture = await readFile(
       fileURLToPath(new URL("./fixtures/grok-1.0.x/free-tier-quota-error.jsonl", import.meta.url)),

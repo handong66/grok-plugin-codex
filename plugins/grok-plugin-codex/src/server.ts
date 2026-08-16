@@ -139,8 +139,12 @@ server.registerTool(
     description:
       "Separate Grok CLI discovery, capability compatibility, authentication/model listing, entitlement, and " +
       "actual model-call evidence. authenticated and entitled are true, false, or the string \"unknown\" — " +
-      "never null — so an undetermined fact cannot be read as a negative one. entitled is false only when " +
+      "never null — so an undetermined fact cannot be read as a negative one. authenticated is true only " +
+      "on positive sign-in evidence and false only on an explicit negative; a model listing that never " +
+      "mentions login is \"unknown\". entitled is false only when " +
       "the CLI reported a quota stop, and true only when an invocation probe answered. " +
+      "A failed discovery call reports retryable from the failure classifier, so auth and quota stops are " +
+      "not advertised as retryable. " +
       "modelInvocationTested and callable stay false/null unless probeInvocation is explicitly requested. " +
       "With a cwd given but no workspace roots this tool degrades to an unbounded diagnostic run with a " +
       "warning, so diagnostics stay reachable exactly when the workspace metadata is missing.",
