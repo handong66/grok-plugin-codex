@@ -2,33 +2,7 @@ import { join } from "node:path";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { JobStore } from "../plugins/grok-plugin-codex/src/job-store.js";
 import { grokRun } from "../plugins/grok-plugin-codex/src/tools.js";
-import { fakeGrokScript, makeExecutable, tempDir } from "./helpers.js";
-
-type ToolResult = {
-  content: Array<{ type: string; text: string }>;
-  structuredContent?: Record<string, unknown>;
-  isError?: boolean;
-};
-
-function envelope(result: ToolResult): Record<string, any> {
-  return JSON.parse(result.content[0].text) as Record<string, any>;
-}
-
-async function withEnv<T>(values: Record<string, string | undefined>, operation: () => Promise<T>): Promise<T> {
-  const previous = Object.fromEntries(Object.keys(values).map((key) => [key, process.env[key]]));
-  for (const [key, value] of Object.entries(values)) {
-    if (value === undefined) delete process.env[key];
-    else process.env[key] = value;
-  }
-  try {
-    return await operation();
-  } finally {
-    for (const [key, value] of Object.entries(previous)) {
-      if (value === undefined) delete process.env[key];
-      else process.env[key] = value;
-    }
-  }
-}
+import { ToolResult, envelope, fakeGrokScript, makeExecutable, tempDir, withEnv } from "./helpers.js";
 
 /** A Grok that keeps the job running for `delayMs` before emitting its answer. */
 function slowGrokScript(delayMs: number): string {

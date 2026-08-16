@@ -6,6 +6,39 @@ export async function tempDir(prefix = "grok-plugin-codex-test-"): Promise<strin
   return await mkdtemp(join(tmpdir(), prefix));
 }
 
+/** The MCP tool-call shape every tool in this plugin returns. */
+export type ToolResult = {
+  content: Array<{ type: string; text: string }>;
+  structuredContent?: Record<string, unknown>;
+  isError?: boolean;
+};
+
+/**
+ * FINAL Review M13: 17 test files carried byte-identical copies of this and of `withEnv`, so a
+ * change to the envelope shape had 17 places to miss. `tools.test.ts` keeps a stricter local
+ * variant that also asserts `structuredContent` parity; everything else uses this one.
+ */
+export function envelope(result: ToolResult): Record<string, any> {
+  return JSON.parse(result.content[0].text) as Record<string, any>;
+}
+
+/** Sets environment variables for one operation and restores exactly what was there before. */
+export async function withEnv<T>(values: Record<string, string | undefined>, operation: () => Promise<T>): Promise<T> {
+  const previous = Object.fromEntries(Object.keys(values).map((key) => [key, process.env[key]]));
+  for (const [key, value] of Object.entries(values)) {
+    if (value === undefined) delete process.env[key];
+    else process.env[key] = value;
+  }
+  try {
+    return await operation();
+  } finally {
+    for (const [key, value] of Object.entries(previous)) {
+      if (value === undefined) delete process.env[key];
+      else process.env[key] = value;
+    }
+  }
+}
+
 export async function makeExecutable(path: string, body: string): Promise<string> {
   await writeFile(path, body);
   await chmod(path, 0o755);

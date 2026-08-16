@@ -2,34 +2,9 @@ import { readFile, readdir } from "node:fs/promises";
 import { join } from "node:path";
 import { describe, expect, it } from "vitest";
 import { FINALIZE_PROMPT, buildRecovery, grokResult, grokRun } from "../plugins/grok-plugin-codex/src/tools.js";
-import { makeExecutable, tempDir } from "./helpers.js";
-
-type ToolResult = {
-  content: Array<{ type: string; text: string }>;
-  isError?: boolean;
-};
+import { envelope, makeExecutable, tempDir, withEnv } from "./helpers.js";
 
 const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
-
-function envelope(result: ToolResult): Record<string, any> {
-  return JSON.parse(result.content[0].text) as Record<string, any>;
-}
-
-async function withEnv<T>(values: Record<string, string | undefined>, operation: () => Promise<T>): Promise<T> {
-  const previous = Object.fromEntries(Object.keys(values).map((key) => [key, process.env[key]]));
-  for (const [key, value] of Object.entries(values)) {
-    if (value === undefined) delete process.env[key];
-    else process.env[key] = value;
-  }
-  try {
-    return await operation();
-  } finally {
-    for (const [key, value] of Object.entries(previous)) {
-      if (value === undefined) delete process.env[key];
-      else process.env[key] = value;
-    }
-  }
-}
 
 async function onlyRecord(stateDir: string): Promise<Record<string, any>> {
   const entries = await readdir(join(stateDir, "jobs"));

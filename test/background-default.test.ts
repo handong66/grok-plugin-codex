@@ -7,32 +7,7 @@ import {
   grokReview,
   grokRun
 } from "../plugins/grok-plugin-codex/src/tools.js";
-import { makeExecutable, tempDir } from "./helpers.js";
-
-type ToolResult = {
-  content: Array<{ type: string; text: string }>;
-  isError?: boolean;
-};
-
-function envelope(result: ToolResult): Record<string, any> {
-  return JSON.parse(result.content[0].text) as Record<string, any>;
-}
-
-async function withEnv<T>(values: Record<string, string | undefined>, operation: () => Promise<T>): Promise<T> {
-  const previous = Object.fromEntries(Object.keys(values).map((key) => [key, process.env[key]]));
-  for (const [key, value] of Object.entries(values)) {
-    if (value === undefined) delete process.env[key];
-    else process.env[key] = value;
-  }
-  try {
-    return await operation();
-  } finally {
-    for (const [key, value] of Object.entries(previous)) {
-      if (value === undefined) delete process.env[key];
-      else process.env[key] = value;
-    }
-  }
-}
+import { envelope, makeExecutable, tempDir, withEnv } from "./helpers.js";
 
 /** Emits nothing for a long time: a foreground call would block, a background one returns at once. */
 const SILENT_GROK = `#!/bin/sh

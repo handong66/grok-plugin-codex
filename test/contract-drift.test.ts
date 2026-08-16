@@ -2,14 +2,10 @@ import { mkdir, readFile, writeFile } from "node:fs/promises";
 import { join } from "node:path";
 import { describe, expect, test } from "vitest";
 import { BACKGROUND_DEFAULT_BY_KIND, grokResult } from "../plugins/grok-plugin-codex/src/tools.js";
-import { tempDir } from "./helpers.js";
+import { envelope, tempDir } from "./helpers.js";
 
 async function text(path: string): Promise<string> {
   return await readFile(path, "utf8");
-}
-
-function envelope(result: { content: Array<{ type: string; text: string }> }): Record<string, any> {
-  return JSON.parse(result.content[0].text) as Record<string, any>;
 }
 
 /** A terminal job on disk, so `grok_result` can be exercised without starting a process. */

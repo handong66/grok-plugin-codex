@@ -13,13 +13,7 @@ import {
   grokSessions,
   grokStatus
 } from "../plugins/grok-plugin-codex/src/tools.js";
-import { STOP_REASON_SPELLINGS, fakeGrokScript, makeExecutable, tempDir } from "./helpers.js";
-
-type ToolResult = {
-  content: Array<{ type: string; text: string }>;
-  structuredContent?: Record<string, unknown>;
-  isError?: boolean;
-};
+import { STOP_REASON_SPELLINGS, ToolResult, fakeGrokScript, makeExecutable, tempDir, withEnv } from "./helpers.js";
 
 function envelope(result: ToolResult): Record<string, any> {
   const parsed = JSON.parse(result.content[0].text) as Record<string, any>;
@@ -29,22 +23,6 @@ function envelope(result: ToolResult): Record<string, any> {
   expect(parsed).toHaveProperty("error");
   expect(parsed).toHaveProperty("warnings");
   return parsed;
-}
-
-async function withEnv<T>(values: Record<string, string | undefined>, operation: () => Promise<T>): Promise<T> {
-  const previous = Object.fromEntries(Object.keys(values).map((key) => [key, process.env[key]]));
-  for (const [key, value] of Object.entries(values)) {
-    if (value === undefined) delete process.env[key];
-    else process.env[key] = value;
-  }
-  try {
-    return await operation();
-  } finally {
-    for (const [key, value] of Object.entries(previous)) {
-      if (value === undefined) delete process.env[key];
-      else process.env[key] = value;
-    }
-  }
 }
 
 function roots(dir: string) {
