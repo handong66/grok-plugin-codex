@@ -574,9 +574,22 @@ export class JobStore {
    * permission lookup consults that too rather than resolving the session to "unknown" and letting
    * `alwaysApprove` through.
    */
-  private async recordSessionId(jobId: string, record: JobRecord): Promise<string | undefined> {
+  private async recordSessionId(
+    jobId: string,
+    record: JobRecord,
+    /**
+     * N1: a record with no `grokSessionId` costs one `<id>.summary.json` read, and
+     * `findLatestSessionOrigin` calls `findSessionOrigin` once per candidate session — each of which
+     * rescans every record. Without a cache that is O(N²) small reads on the recovery path
+     * (`continueLatest`, and the degraded `grok_finalize({ cwd })`). The cache lives for one lookup.
+     */
+    cache?: Map<string, string | undefined>
+  ): Promise<string | undefined> {
     if (record.grokSessionId) return record.grokSessionId;
-    return (await this.readStreamProgress(jobId))?.grokSessionId;
+    if (cache?.has(jobId)) return cache.get(jobId);
+    const learned = (await this.readStreamProgress(jobId))?.grokSessionId;
+    cache?.set(jobId, learned);
+    return learned;
   }
 
   /**
@@ -585,7 +598,8 @@ export class JobStore {
    * read-only, so an adversarial-review session cannot be continued with write permissions.
    */
   async findSessionOrigin(
-    grokSessionId: string
+    grokSessionId: string,
+    sessionIdCache?: Map<string, string | undefined>
   ): Promise<{ jobId: string; kind: JobKind; readOnly: boolean } | undefined> {
     await this.ensure();
     const entries = await readdir(this.jobsDir(), { withFileTypes: true }).catch(() => []);
@@ -597,7 +611,7 @@ export class JobStore {
       const jobId = entry.name.slice(0, -5);
       if (!JOB_ID_PATTERN.test(jobId)) continue;
       const record = await this.read(jobId).catch(() => null);
-      if (!record || (await this.recordSessionId(jobId, record)) !== grokSessionId) continue;
+      if (!record || (await this.recordSessionId(jobId, record, sessionIdCache)) !== grokSessionId) continue;
       readOnly ||= jobWasReadOnly(record);
       const candidate = { jobId, kind: record.kind, createdAt: Date.parse(record.createdAt) };
       if (!earliest || !Number.isFinite(earliest.createdAt) || candidate.createdAt <= earliest.createdAt) {
@@ -630,6 +644,8 @@ export class JobStore {
     const workspace = resolve(cwd);
     const entries = await readdir(this.jobsDir(), { withFileTypes: true }).catch(() => []);
     const candidates: { grokSessionId: string; createdAt: number }[] = [];
+    // One summary read per record for the whole lookup, however many candidate sessions it walks.
+    const sessionIdCache = new Map<string, string | undefined>();
     for (const entry of entries) {
       if (!entry.isFile() || !entry.name.endsWith(".json")) continue;
       const jobId = entry.name.slice(0, -5);
@@ -642,7 +658,7 @@ export class JobStore {
       // fail-closed guard degraded into a warning. A session the CLI has already denied is not a
       // candidate for "the session the CLI is about to resume".
       if (record.error?.code === "session_not_found") continue;
-      const grokSessionId = await this.recordSessionId(jobId, record);
+      const grokSessionId = await this.recordSessionId(jobId, record, sessionIdCache);
       if (!grokSessionId) continue;
       candidates.push({ grokSessionId, createdAt: Date.parse(record.createdAt) || 0 });
     }
@@ -651,7 +667,7 @@ export class JobStore {
     // keep walking back: the newest id that resolves to a real origin is better evidence than the
     // newest id overall, which may belong to a session this plugin only ever continued.
     for (const grokSessionId of new Set(candidates.map((candidate) => candidate.grokSessionId))) {
-      const origin = await this.findSessionOrigin(grokSessionId);
+      const origin = await this.findSessionOrigin(grokSessionId, sessionIdCache);
       if (origin) return { ...origin, grokSessionId };
     }
     return undefined;

@@ -324,3 +324,56 @@ describe("Grok job output summary", () => {
     await expect(access(store.inputPath(running.id))).resolves.toBeUndefined();
   });
 });
+
+/**
+ * N1 (external fix-round-1 re-review). A record with no `grokSessionId` costs one
+ * `<id>.summary.json` read, and `findLatestSessionOrigin` asks `findSessionOrigin` about every
+ * candidate session — each of which rescans every record. The lookup was therefore O(N²) small reads
+ * on exactly the recovery path `continueLatest` and the degraded `grok_finalize({ cwd })` take.
+ */
+describe("session lookup cost", () => {
+  it("reads each job's stream summary at most once per lookup", async () => {
+    const stateDir = await tempDir();
+    class CountingStore extends JobStore {
+      summaryReads = 0;
+      override async readStreamProgress(jobId: string) {
+        this.summaryReads += 1;
+        return await super.readStreamProgress(jobId);
+      }
+    }
+    const store = new CountingStore({ stateDir });
+    await store.ensure();
+    const jobsDir = join(stateDir, "jobs");
+    const jobCount = 6;
+    for (let index = 0; index < jobCount; index += 1) {
+      const jobId = `job_latencyprobe000000000${index}`;
+      // Continuations only: none of them can be an origin, so the lookup walks every candidate.
+      await writeFile(
+        join(jobsDir, `${jobId}.json`),
+        JSON.stringify({
+          id: jobId,
+          kind: "continue",
+          status: "succeeded",
+          cwd: "/repo",
+          command: "grok",
+          args: [],
+          createdAt: new Date(1_700_000_000_000 + index * 1_000).toISOString(),
+          timeoutMs: 30_000
+        }),
+        { mode: 0o600 }
+      );
+      // `eventCounts` is what makes `readStreamProgress` accept the summary; without it the id is
+      // never learned, the candidate list stays empty and the quadratic walk never even happens.
+      await store.writeStreamSummary(
+        jobId,
+        JSON.stringify({ version: 1, grokSessionId: `session-${index}`, textChars: 1, eventCounts: { text: 1 } })
+      );
+    }
+
+    const origin = await store.findLatestSessionOrigin("/repo");
+
+    expect(origin).toBeUndefined();
+    // One read per record. Without the per-lookup cache this was jobCount * (jobCount + 1) = 42.
+    expect(store.summaryReads).toBeLessThanOrEqual(jobCount * 2);
+  });
+});
