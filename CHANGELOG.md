@@ -12,8 +12,26 @@ All notable user-visible and contract changes to `grok-plugin-codex`.
   Stop reasons are now normalised case- and separator-insensitively (`normalizeStopReason`), and `canceled` is
   accepted alongside `cancelled`. Callers must not string-match the raw value.
 
+- **GPC-02 — timeouts misreported as `worker_error`.** Every recorded wall-clock timeout that failed
+  during teardown (killing the launcher tree, awaiting stream close, flushing logs) skipped the
+  classification path and was stored as `worker_error` with `exitCode: null` and `signal: null` — 29 of
+  64 failures. Teardown now runs in its own `try`/`catch`, so the normal classification always runs, and
+  a teardown exception is reported as `error.details.teardownError` instead of replacing the outcome.
+  If a later step still throws, the worker classifies from its own scope: `timedOut` → `timeout`
+  (`Grok exceeded timeoutMs=<n> (teardown failed).`), `cancelRequested` → `cancelled`, otherwise
+  `worker_error`.
+
 ### Added
 
+- Typed failure diagnostics on worker-recorded errors:
+  `error.details = { phase, errorName, errorMessage (≤500 chars), errnoCode, stackTail, teardownError }`,
+  plus `timeoutMs` on timeouts. Foreground tools merge them into the error envelope.
+- The worker's own stderr is captured to a private `jobs/<id>.worker.log` (`0600`) instead of being
+  discarded, is included in the strict state-directory layout check and in seven-day cleanup, and its
+  tail is attached to `worker_unavailable` as `error.details.workerLogTail`.
+- `sessionIdFromStderr` (§D M8): when stdout carries no `end` event — exactly the timed-out and killed
+  runs — the session id is recovered from Grok's `session_id=<uuid>` stderr line, so
+  `outputSummary.grokSessionId` is populated where it was previously always undefined.
 - `outputSummary.stopReasonNormalized` (the compared form; raw `stopReason` is unchanged), and
   `outputSummary.stopReasonRecognised`.
 - `outputSummary.warnings`, surfaced in the `warnings` array of `grok_run` / `grok_continue` / `grok_review` /

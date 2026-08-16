@@ -18,7 +18,34 @@ import { summarizeGrokOutput } from "./result-parser.js";
 import type { JobRecord } from "./types.js";
 
 const MAX_CAPTURE_CHARS = 1_000_000;
+const MAX_ERROR_MESSAGE_CHARS = 500;
+const MAX_STACK_TAIL_CHARS = 1_000;
 const execFileAsync = promisify(execFile);
+
+function boundedText(value: string, maxChars: number): string {
+  return value.length > maxChars ? value.slice(0, maxChars) : value;
+}
+
+/**
+ * A worker that dies with `stdio: "ignore"` loses its exception text for good, so every failure
+ * carries enough structure to name one session instead of forcing another log audit.
+ */
+function describeFailure(
+  phase: string,
+  error: unknown,
+  teardownError?: string
+): Record<string, unknown> {
+  const asError = error instanceof Error ? error : undefined;
+  const stack = asError?.stack ?? "";
+  return {
+    phase,
+    errorName: asError?.name ?? typeof error,
+    errorMessage: boundedText(asError?.message ?? String(error), MAX_ERROR_MESSAGE_CHARS),
+    errnoCode: (error as NodeJS.ErrnoException | undefined)?.code,
+    stackTail: stack ? stack.slice(-MAX_STACK_TAIL_CHARS) : undefined,
+    ...(teardownError ? { teardownError } : {})
+  };
+}
 
 function appendTail(current: string, chunk: string): { value: string; truncated: boolean } {
   const combined = current + chunk;
@@ -147,6 +174,7 @@ export async function runJobWorker(jobId: string, store = new JobStore()): Promi
   let stderr = "";
   let outputTruncated = false;
   let promptDeliveryError: Error | undefined;
+  let teardownError: string | undefined;
   let timedOut = false;
   let cancelRequested = false;
   let forceKillTimer: NodeJS.Timeout | undefined;
@@ -283,12 +311,22 @@ export async function runJobWorker(jobId: string, store = new JobStore()): Promi
     timeout.unref();
 
     const outcome = await outcomePromise;
-    signalPidTree(launcherPid, "SIGKILL");
-    await Promise.all([promptDelivery, streamsClosedPromise]);
-    clearTimeout(timeout);
-    if (forceKillTimer) clearTimeout(forceKillTimer);
-    if (flushTimer) clearTimeout(flushTimer);
-    await flushLogs();
+    // Teardown must never decide the outcome. Every recorded `worker_error` in the 2026-08 window
+    // was a wall-clock timeout whose classification was skipped because one of these steps threw.
+    try {
+      signalPidTree(launcherPid, "SIGKILL");
+      await Promise.all([promptDelivery, streamsClosedPromise]);
+      await flushLogs();
+    } catch (error) {
+      teardownError = boundedText(
+        error instanceof Error ? `${error.name}: ${error.message}` : String(error),
+        MAX_ERROR_MESSAGE_CHARS
+      );
+    } finally {
+      clearTimeout(timeout);
+      if (forceKillTimer) clearTimeout(forceKillTimer);
+      if (flushTimer) clearTimeout(flushTimer);
+    }
 
     const latest = await store.read(jobId);
     latest.exitCode = outcome.exitCode;
@@ -302,21 +340,24 @@ export async function runJobWorker(jobId: string, store = new JobStore()): Promi
       latest.error = {
         code: "timeout",
         message: `Grok exceeded timeoutMs=${latest.timeoutMs}.`,
-        retryable: true
+        retryable: true,
+        details: { phase: "run", timeoutMs: latest.timeoutMs, ...(teardownError ? { teardownError } : {}) }
       };
     } else if (promptDeliveryError) {
       latest.status = "failed";
       latest.error = {
         code: "prompt_delivery_error",
         message: "The complete prompt could not be delivered to the Grok CLI.",
-        retryable: true
+        retryable: true,
+        details: describeFailure("prompt_delivery", promptDeliveryError, teardownError)
       };
     } else if (outcome.error) {
       latest.status = "failed";
       latest.error = {
         code: "spawn_error",
         message: "The Grok CLI process could not be started.",
-        retryable: true
+        retryable: true,
+        details: describeFailure("spawn", outcome.error, teardownError)
       };
     } else {
       const parsed = summarizeGrokOutput(
@@ -346,7 +387,8 @@ export async function runJobWorker(jobId: string, store = new JobStore()): Promi
           latest.error = {
             code,
             message: grokFailureMessage(code),
-            retryable: isRetryableGrokFailure(code)
+            retryable: isRetryableGrokFailure(code),
+            ...(teardownError ? { details: { phase: "run", teardownError } } : {})
           };
         }
       }
@@ -355,13 +397,36 @@ export async function runJobWorker(jobId: string, store = new JobStore()): Promi
   } catch (error) {
     record = await store.read(jobId).catch(() => record);
     if (record.status !== "cancelled") {
-      record.status = "failed";
-      record.error = {
-        code: "worker_error",
-        message: "The Grok worker encountered an internal error.",
-        retryable: true
-      };
+      // `timedOut` and `cancelRequested` are locals of this same scope, so the reason the run ended
+      // is still known here even when the failure happened after the Grok process was gone.
+      const details = describeFailure("worker", error, teardownError);
       record.finishedAt = new Date().toISOString();
+      if (timedOut) {
+        record.status = "failed";
+        record.error = {
+          code: "timeout",
+          message: `Grok exceeded timeoutMs=${record.timeoutMs} (teardown failed).`,
+          retryable: true,
+          details: { ...details, timeoutMs: record.timeoutMs }
+        };
+      } else if (cancelRequested) {
+        record.status = "cancelled";
+        record.cancelRequestedAt ??= record.finishedAt;
+        record.error = {
+          code: "cancelled",
+          message: "The Grok request was cancelled before completion (worker teardown failed).",
+          retryable: false,
+          details
+        };
+      } else {
+        record.status = "failed";
+        record.error = {
+          code: "worker_error",
+          message: "The Grok worker encountered an internal error.",
+          retryable: true,
+          details
+        };
+      }
       await store.write(record).catch(() => undefined);
     }
     throw error;

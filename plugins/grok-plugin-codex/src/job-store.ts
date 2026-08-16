@@ -28,6 +28,7 @@ const DEFAULT_TIMEOUT_MS = 600_000;
 const WORKER_STARTUP_GRACE_MS = 5_000;
 const WORKER_HEARTBEAT_STALE_MS = 5_000;
 const MAX_RESULT_CHARS = 100_000;
+const WORKER_LOG_TAIL_CHARS = 4_000;
 const SUMMARY_READ_CHARS = 1_000_000;
 const TERMINAL_RETENTION_MS = 7 * 24 * 60 * 60 * 1_000;
 const JOB_LOCK_STALE_MS = 2_000;
@@ -134,7 +135,7 @@ async function isRecognizedPreMarkerStateDir(stateDir: string, stateMode: number
 
   for (const entry of jobEntries) {
     const match = entry.name.match(
-      /^(job_[A-Za-z0-9_-]{16,128})(?:\.json|\.stdout\.log|\.stderr\.log|\.heartbeat|\.cancel|\.input|\.lock)$/
+      /^(job_[A-Za-z0-9_-]{16,128})(?:\.json|\.stdout\.log|\.stderr\.log|\.worker\.log|\.heartbeat|\.cancel|\.input|\.lock)$/
     );
     if (!match?.[1] || !validJobIds.has(match[1])) return false;
     const metadata = await lstat(join(jobsDir, entry.name)).catch(() => null);
@@ -213,6 +214,12 @@ export class JobStore {
   heartbeatPath(jobId: string): string {
     assertJobId(jobId);
     return join(this.jobsDir(), `${jobId}.heartbeat`);
+  }
+
+  /** Private capture of the worker process's own stderr; without it a hard crash is unreadable. */
+  workerLogPath(jobId: string): string {
+    assertJobId(jobId);
+    return join(this.jobsDir(), `${jobId}.worker.log`);
   }
 
   async ensure(): Promise<void> {
@@ -461,11 +468,13 @@ export class JobStore {
     await this.terminateOwnedWorker(record);
     record = await this.read(jobId);
     if (TERMINAL_STATUSES.has(record.status) || (await this.hasFreshHeartbeat(jobId))) return record;
+    const workerLogTail = await readTail(this.workerLogPath(jobId), WORKER_LOG_TAIL_CHARS);
     record.status = "failed";
     record.error = {
       code: "worker_unavailable",
       message: "The Grok background worker exited without recording a terminal result.",
-      retryable: true
+      retryable: true,
+      details: { phase: "worker_liveness", ...(workerLogTail.trim() ? { workerLogTail } : {}) }
     };
     record.finishedAt = new Date().toISOString();
     await rm(this.inputPath(jobId), { force: true });
@@ -508,12 +517,21 @@ export class JobStore {
       processToken: randomUUID()
     };
     await this.write(record);
-    const worker = spawn(process.execPath, [this.workerPath, id], {
-      cwd: params.cwd,
-      detached: true,
-      stdio: "ignore",
-      env: buildWorkerEnv({ ...this.env, GROK_PLUGIN_STATE_DIR: this.stateDir })
-    });
+    // Keep the worker's own stderr instead of discarding it: a crashed worker used to leave nothing
+    // behind but a bare `worker_unavailable`, which cost a full log audit to diagnose.
+    const workerLog = await open(this.workerLogPath(id), "a", 0o600).catch(() => null);
+    let worker;
+    try {
+      if (workerLog) await chmod(this.workerLogPath(id), 0o600).catch(() => undefined);
+      worker = spawn(process.execPath, [this.workerPath, id], {
+        cwd: params.cwd,
+        detached: true,
+        stdio: ["ignore", "ignore", workerLog ? workerLog.fd : "ignore"],
+        env: buildWorkerEnv({ ...this.env, GROK_PLUGIN_STATE_DIR: this.stateDir })
+      });
+    } finally {
+      await workerLog?.close().catch(() => undefined);
+    }
     if (!worker.pid) {
       record.status = "failed";
       record.error = { code: "worker_spawn_error", message: "Failed to start the Grok background worker.", retryable: true };
@@ -626,6 +644,7 @@ export class JobStore {
         rm(this.jobPath(jobId), { force: true }),
         rm(this.stdoutPath(jobId), { force: true }),
         rm(this.stderrPath(jobId), { force: true }),
+        rm(this.workerLogPath(jobId), { force: true }),
         rm(this.inputPath(jobId), { force: true }),
         rm(this.heartbeatPath(jobId), { force: true }),
         rm(this.cancelPath(jobId), { force: true }),

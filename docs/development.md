@@ -34,7 +34,7 @@ npm run smoke:live-grok
 - `src/server.ts` owns MCP names and input/output schemas.
 - `src/tools.ts` owns workspace validation, command construction, envelopes, and foreground polling behavior.
 - `src/job-store.ts` owns private state, owner-checked locks, atomic/monotonic persistence, process-group ownership verification, cancellation markers, cleanup, and public-job sanitization.
-- `src/job-worker.ts` owns foreground/background CLI process lifetime, heartbeat, timeout, tree termination, logs, and prompt handoff/cleanup.
+- `src/job-worker.ts` owns foreground/background CLI process lifetime, heartbeat, timeout, tree termination, logs, prompt handoff/cleanup, and terminal classification.
 - `src/result-parser.ts` owns streaming finality.
 - `scripts/smoke-mcp.mjs` and `test/contract-drift.test.ts` lock the published contract.
 - Bundled README and skill files explain the installed contract; the root README is developer and release documentation.
@@ -68,6 +68,25 @@ Streaming lines may contain non-JSON diagnostics. The parser accepts JSON events
 Only then is `resultComplete` true. Codex still verifies the result against real workspace files.
 
 An end event whose normalised stop reason is a cancellation remains `cancelled_partial` and foreground tools return `cancelled_output`. A `max_turns_reached` stream event is a typed retryable failure; callers should narrow the target or increase `maxTurns`. Both paths retain the Grok session ID, request ID, stop reason, bounded stderr, and partial text for diagnosis or continuation.
+
+## Failure classification
+
+Process teardown after the Grok CLI exits — killing the launcher tree, awaiting prompt delivery and
+stream close, flushing logs — is wrapped in its own `try`/`catch`. A teardown exception is recorded as
+`error.details.teardownError` and never replaces the outcome, because the normal path is the only place
+that knows the run hit its wall clock. Skipping it is what turned 29 recorded timeouts into
+`worker_error` with `exitCode: null` and `signal: null`.
+
+If something still throws, the worker classifies from its own scope flags rather than defaulting:
+`timedOut` gives `timeout` (message ends `(teardown failed).`), `cancelRequested` gives `cancelled`,
+and only an otherwise unexplained failure stays `worker_error`. Every one of those carries
+`details: { phase, errorName, errorMessage, errnoCode, stackTail, teardownError }`, bounded to 500 and
+1,000 characters.
+
+The worker's own stderr goes to `<id>.worker.log` (`0600`) instead of `/dev/null`, so a worker that dies
+outright still leaves evidence; `JobStore.status()` attaches its tail to `worker_unavailable`. The file
+is in the strict pre-marker layout allowlist and in `cleanupExpiredJobs` — a new artifact name missing
+from either would make `ensure()` reject a real state directory.
 
 ## Local upgrade loop
 

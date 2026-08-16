@@ -1,7 +1,11 @@
 import { readFile } from "node:fs/promises";
 import { fileURLToPath } from "node:url";
 import { describe, expect, it } from "vitest";
-import { normalizeStopReason, summarizeGrokOutput } from "../plugins/grok-plugin-codex/src/result-parser.js";
+import {
+  normalizeStopReason,
+  sessionIdFromStderr,
+  summarizeGrokOutput
+} from "../plugins/grok-plugin-codex/src/result-parser.js";
 import type { JobRecord } from "../plugins/grok-plugin-codex/src/types.js";
 
 function record(status: JobRecord["status"]): JobRecord {
@@ -101,6 +105,34 @@ describe("stop reason normalisation", () => {
 
     expect(summary.resultComplete).toBe(false);
     expect(summary.outputTruncated).toBe(true);
+  });
+});
+
+describe("session id recovery from stderr", () => {
+  // Recorded shape: `ERROR tool_error: tool_output_error session_id=<uuid> tool_name="Read" ...`
+  const stderr =
+    'ERROR tool_error: tool_output_error session_id=019f436e-b14c-7c23-b7f4-505e81ef1f3b tool_name="Read"';
+
+  it("extracts the session id the CLI printed to stderr", () => {
+    expect(sessionIdFromStderr(stderr)).toBe("019f436e-b14c-7c23-b7f4-505e81ef1f3b");
+    expect(sessionIdFromStderr("no session here")).toBeUndefined();
+  });
+
+  it("recovers a session id for a run that never emitted an end event", () => {
+    const summary = summarizeGrokOutput(
+      record("failed"),
+      JSON.stringify({ type: "text", data: "partial work" }),
+      stderr
+    );
+
+    expect(summary.sawEnd).toBe(false);
+    expect(summary.grokSessionId).toBe("019f436e-b14c-7c23-b7f4-505e81ef1f3b");
+  });
+
+  it("never overrides the session id reported by the end event", () => {
+    const summary = summarizeGrokOutput(record("succeeded"), stream("end_turn"), stderr);
+
+    expect(summary.grokSessionId).toBe("s1");
   });
 });
 

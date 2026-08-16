@@ -355,6 +355,7 @@ async function runOrStartJob(params: CommonArgs & {
       };
       throw new GrokPluginError(error.code, error.message, error.retryable, {
         exitCode: result.record.exitCode,
+        ...error.details,
         ...diagnosticDetails
       });
     }

@@ -9,6 +9,15 @@ export function normalizeStopReason(value: string | undefined): string {
 const NORMAL_COMPLETION_STOP_REASONS = new Set(["endturn"]);
 const CANCELLED_STOP_REASONS = new Set(["cancelled", "canceled"]);
 
+/**
+ * stdout only carries the session id inside the `end` event, which is exactly the event a killed or
+ * timed-out run never emits. Grok also prints `session_id=<uuid>` to stderr on tool errors, so that
+ * channel is a free fallback for the runs that most need a continuation handle.
+ */
+export function sessionIdFromStderr(stderr: string): string | undefined {
+  return /session_id=([0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12})/i.exec(stderr)?.[1];
+}
+
 function previewText(text: string): string {
   const singleLine = text.replace(/\s+/g, " ").trim();
   return singleLine.length > 500 ? `${singleLine.slice(0, 497)}...` : singleLine;
@@ -106,6 +115,7 @@ export function summarizeGrokOutput(
   const stopReasonNormalized = normalizeStopReason(stopReason);
   const stopReasonRecognised =
     NORMAL_COMPLETION_STOP_REASONS.has(stopReasonNormalized) || CANCELLED_STOP_REASONS.has(stopReasonNormalized);
+  grokSessionId ??= sessionIdFromStderr(stderr);
 
   let state: JobOutputSummary["state"];
   if (record.status === "failed" || streamError) state = "failed_partial";
