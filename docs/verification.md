@@ -87,7 +87,7 @@ npm audit --omit=dev
 npm pack --dry-run
 ```
 
-Then update the plugin cachebuster, reinstall from the confirmed local marketplace, start a new Codex task, and verify:
+Then reinstall from the confirmed local marketplace, start a new Codex task, and verify:
 
 - installed version and cache path correspond to the new manifest;
 - `listTools` has no removed arguments and all tools have output schemas;
@@ -96,6 +96,12 @@ Then update the plugin cachebuster, reinstall from the confirmed local marketpla
 - one safe live invocation proves actual callability;
 - repo source, marketplace source, installed bundle, and generated `dist` hashes match where expected.
 
-Leave the single cachebuster suffix in the source manifest while a configured local marketplace points directly at that repository. If a new Codex Desktop task sees the new skill but not the new MCP tools while `codex mcp list` shows the server enabled, restart Codex Desktop and repeat the new-task check; Desktop can retain a process-level MCP registry across reinstall.
+The `+codex.<cachebuster>` suffix is a **local development** device for forcing a reinstall while a
+configured local marketplace points directly at this repository, and it must never reach a published
+manifest: `GROK_PLUGIN_RELEASE=1 npm run validate:plugin` rejects it, and the 0.3.0 manifest carries
+none. Add it only for a local reinstall, and strip it before the release build. If a new Codex Desktop
+task sees the new skill but not the new MCP tools while `codex mcp list` shows the server enabled,
+restart Codex Desktop and repeat the new-task check; Desktop can retain a process-level MCP registry
+across reinstall.
 
 Record fresh outputs for the release under review; do not reuse a previous release ledger.
