@@ -384,7 +384,20 @@ async function resolveDiscoveryCwd(
       onWarning?.(
         "The MCP client supplied no workspace roots; diagnostics ran without a workspace boundary check."
       );
-      return await realpath(resolve(cwd)).catch(() => homedir());
+      // X13: only the *boundary* check degrades. This used to fall back to `homedir()` whenever the
+      // named directory could not be resolved, so a typo'd or deleted `cwd` silently ran the
+      // diagnostics — including the opt-in, quota-spending invocation probe — somewhere the caller
+      // never named, and reported success for it. A path that does not resolve is still an error.
+      let candidate: string;
+      try {
+        candidate = await realpath(resolve(cwd));
+      } catch {
+        throw new GrokPluginError("workspace_not_found", "The requested working directory does not exist.");
+      }
+      if (!(await stat(candidate)).isDirectory()) {
+        throw new GrokPluginError("workspace_invalid", "The requested working directory is not a directory.");
+      }
+      return candidate;
     }
   }
 

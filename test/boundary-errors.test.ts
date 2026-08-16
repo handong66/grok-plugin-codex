@@ -1,4 +1,4 @@
-import { mkdir, readFile } from "node:fs/promises";
+import { mkdir, readFile, writeFile } from "node:fs/promises";
 import { join } from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
 import {
@@ -175,6 +175,39 @@ describe("GPC-10 diagnostics stay reachable", () => {
     // GPC-10.2: no literal — the reported version is whatever package.json says.
     const packageVersion = JSON.parse(await readFile("package.json", "utf8")).version;
     expect(parsed.data.pluginVersion).toBe(packageVersion);
+  });
+
+  /**
+   * X13. Losing the roots must cost the caller the boundary check and nothing else. The fallback
+   * used to be `homedir()`, so a `cwd` that does not exist ran the diagnostics — including the
+   * opt-in, quota-spending invocation probe — in the user's home directory and reported `ok: true`
+   * for a directory the caller never named.
+   */
+  it("still refuses a cwd that does not exist when the roots are missing", async () => {
+    configureWorkspaceRootsProvider(async () => []);
+    const workspace = await tempDir();
+    const grokBin = await makeExecutable(join(workspace, "grok"), fakeGrokScript());
+
+    const parsed = envelope(
+      await withEnv({ GROK_BIN: grokBin }, () => grokCheck({ cwd: join(workspace, "no-such-directory") }))
+    );
+
+    expect(parsed.ok).toBe(false);
+    expect(parsed.error.code).toBe("workspace_not_found");
+  });
+
+  it("still refuses a cwd that is a file when the roots are missing", async () => {
+    configureWorkspaceRootsProvider(async () => []);
+    const workspace = await tempDir();
+    const grokBin = await makeExecutable(join(workspace, "grok"), fakeGrokScript());
+    await writeFile(join(workspace, "not-a-directory"), "x");
+
+    const parsed = envelope(
+      await withEnv({ GROK_BIN: grokBin }, () => grokCheck({ cwd: join(workspace, "not-a-directory") }))
+    );
+
+    expect(parsed.ok).toBe(false);
+    expect(parsed.error.code).toBe("workspace_invalid");
   });
 
   it("warns about a leftover 0.1-era job directory in the workspace", async () => {
