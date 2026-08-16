@@ -97,7 +97,10 @@ describe("worker teardown classification", () => {
     const record = await store.read(JOB_ID);
     expect(record.status).toBe("failed");
     expect(record.error?.code).toBe("timeout");
-    expect(record.error?.message).toContain("timeoutMs=700");
+    // GK4: the largest failure class names its recovery instead of restating the budget the caller
+    // set; the budget itself stays machine-readable in details.
+    expect(record.error?.message).toContain("grok_finalize");
+    expect(record.error?.message).not.toMatch(/narrow/i);
     expect(record.error?.details?.timeoutMs).toBe(700);
     expect(String(record.error?.details?.teardownError)).toMatch(/ENOTDIR|ENOENT|EEXIST|not a directory/i);
     // docs/privacy.md promises public results carry no state-file paths; the errno and the artifact
@@ -118,7 +121,10 @@ describe("worker teardown classification", () => {
     const record = await store.read(JOB_ID);
     expect(record.status).toBe("failed");
     expect(record.error?.code).toBe("timeout");
-    expect(record.error?.message).toContain("teardown failed");
+    // Teardown also failing is a diagnostic, not a different recovery: same remedy, and the
+    // teardown fact moves into details where a caller can branch on it.
+    expect(record.error?.message).toContain("grok_finalize");
+    expect(record.error?.details?.teardownFailed).toBe(true);
     expect(record.error?.details?.phase).toBe("worker");
     expect(String(record.error?.details?.errorMessage)).toContain("injected terminal write failure");
     expect(record.error?.details?.errorName).toBe("Error");

@@ -570,8 +570,11 @@ export async function runJobWorker(jobId: string, store = new JobStore()): Promi
     } else if (timedOut) {
       latest.status = "failed";
       latest.error = {
+        // GK4 / GPC-05.4: a wall-clock timeout is the largest recorded failure class, so its message
+        // must be the shared remedy that names grok_finalize — not a restatement of the budget the
+        // caller already set. The budget itself stays machine-readable in `details.timeoutMs`.
         code: "timeout",
-        message: `Grok exceeded timeoutMs=${latest.timeoutMs}.`,
+        message: grokFailureMessage("timeout"),
         retryable: true,
         details: { phase: "run", timeoutMs: latest.timeoutMs, ...(teardownError ? { teardownError } : {}) }
       };
@@ -658,10 +661,12 @@ export async function runJobWorker(jobId: string, store = new JobStore()): Promi
       if (timedOut) {
         record.status = "failed";
         record.error = {
+          // Same remedy as the normal timeout path; that teardown also failed is a diagnostic
+          // (`details.phase: "worker"`, `details.teardownError`), not a different recovery.
           code: "timeout",
-          message: `Grok exceeded timeoutMs=${record.timeoutMs} (teardown failed).`,
+          message: grokFailureMessage("timeout"),
           retryable: true,
-          details: { ...details, timeoutMs: record.timeoutMs }
+          details: { ...details, timeoutMs: record.timeoutMs, teardownFailed: true }
         };
       } else if (cancelRequested) {
         record.status = "cancelled";

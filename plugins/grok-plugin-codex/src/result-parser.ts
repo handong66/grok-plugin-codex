@@ -24,6 +24,24 @@ export const INLINE_COMMAND_OUTPUT_REMEDY =
   "that supplies it. Do not widen permissions and do not treat a verdict reached without that evidence " +
   "as a review. Codex must still verify every finding against the workspace.";
 
+/**
+ * X7: 26 of 43 recorded cancels fired before the median completion time for the kind, because an
+ * in-flight envelope told the caller to cancel and narrow. The tool descriptions now say the
+ * opposite; this is the same rule for callers that read the envelope instead.
+ */
+export const STILL_RUNNING_GUIDANCE =
+  "Grok is still running. Poll grok_status (cheap progress: textChars, eventCounts, lastEventAt) and " +
+  "let it reach timeoutMs. Do not cancel before then unless job.waitingForAuth is true or " +
+  "eventCounts/lastEventAt have not moved for more than 45s. Typical wall time on this machine: " +
+  "continue ~62s, run ~129s, review ~171s, adversarial_review ~223s (median); cancelling earlier " +
+  "throws away a run that was still working and pays the whole budget again on the rerun.";
+
+/**
+ * The three ends that leave a session alive and unanswered. Each recovers through one tool-free
+ * turn, so the guidance for them is the same sentence the typed error carries (GK4 / GPC-05.4).
+ */
+const CONTINUABLE_FAILURE_CODES = new Set(["timeout", "terminated", "max_turns_reached"]);
+
 export const SHELL_APPROVAL_REMEDY =
   "The turn was cancelled because a shell command needed approval in plan mode, not because the target " +
   "was too wide. Inline the required command output into the target, or continue the session with " +
@@ -436,6 +454,11 @@ export function summarizeGrokOutput(
     (deniedShell || Boolean(lastToolName && SHELL_TOOL_PATTERN.test(lastToolName)));
 
   const resultComplete = state === "succeeded_with_text" && !zeroEvidenceVerdict;
+  // The stream's own error event wins; a stored record (the shape `grok_result` re-summarises) only
+  // carries the classified code the worker wrote, and a wall-clock timeout has no stream event at all.
+  const failureCode = streamError?.code ?? record.error?.code;
+  const continuableFailureCode =
+    failureCode && CONTINUABLE_FAILURE_CODES.has(failureCode) ? failureCode : undefined;
   let guidance: string;
   if (shellApprovalBlocked) {
     guidance = SHELL_APPROVAL_REMEDY;
@@ -451,13 +474,17 @@ export function summarizeGrokOutput(
   } else if (textTruncated) {
     guidance = "Grok output exceeded the capture limit and answer text was dropped. Returned text is incomplete and must not be treated as a final result.";
   } else if (record.status === "running" || record.status === "queued") {
-    guidance = "Grok is still running. Poll result later or cancel and rerun with a narrower target.";
-  } else if (streamError?.code === "max_turns_reached") {
-    guidance = CONTINUE_WITHOUT_TOOLS_REMEDY("Grok reached maxTurns before producing a final result.");
+    guidance = STILL_RUNNING_GUIDANCE;
+  } else if (continuableFailureCode) {
+    // GK4 / GPC-05.4: timeout, terminated and max_turns_reached all end the same way — a session
+    // that never got to answer — and all three recover through one tool-free turn. The wording is
+    // owned by grokFailureMessage so the envelope's guidance and its error.message cannot drift.
+    guidance = grokFailureMessage(continuableFailureCode);
   } else if (record.status === "failed" || streamError) {
     guidance = stderr.trim()
       ? "Grok failed. Inspect the bounded stderr tail and correct the environment or prompt."
-      : "Grok failed without stderr. Rerun with a narrower prompt and inspect the structured error.";
+      : "Grok failed without stderr. Read error.code and error.details for the classified cause and " +
+        "recover through error.details.recovery; the captured partial text stays available from grok_result.";
   } else if (state === "cancelled_partial") {
     guidance = CONTINUE_WITHOUT_TOOLS_REMEDY(
       "Grok was cancelled before a final result; any returned text is partial."

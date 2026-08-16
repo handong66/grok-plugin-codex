@@ -76,8 +76,9 @@ as `true` / `false` / `"unknown"` rather than `null`; new tool `grok_finalize`; 
   64 failures. Teardown now runs in its own `try`/`catch`, so the normal classification always runs, and
   a teardown exception is reported as `error.details.teardownError` instead of replacing the outcome.
   If a later step still throws, the worker classifies from its own scope: `timedOut` → `timeout`
-  (`Grok exceeded timeoutMs=<n> (teardown failed).`), `cancelRequested` → `cancelled`, otherwise
-  `worker_error`.
+  (with `details.teardownFailed: true` and `details.phase: "worker"`), `cancelRequested` → `cancelled`,
+  otherwise `worker_error`. Both timeout paths carry the shared `timeout` remedy as their message —
+  the budget stays machine-readable in `details.timeoutMs`.
 
 ### Added
 
@@ -100,7 +101,9 @@ as `true` / `false` / `"unknown"` rather than `null`; new tool `grok_finalize`; 
   Tool descriptions state the typical wall time per kind (continue ~62 s, run ~129 s,
   review ~171 s, adversarial_review ~223 s median) and say not to cancel before `timeoutMs` unless
   `waitingForAuth` is set or the event counters have not moved for 45 s — 26 of 43 recorded cancels
-  fired before the median completion time.
+  fired before the median completion time. `outputSummary.guidance` on an in-flight job carries the
+  same rule; it used to say "cancel and rerun with a narrower target", which is the behaviour X7
+  exists to stop, and it is the field a caller reading the envelope actually sees.
 
 - **GPC-10 / GK1(3) / X10 — `grok_check` was unavailable when it was needed and reported facts it had
   not established.** `workspace_unavailable` used to kill the diagnostic itself: recorded once, with
@@ -182,7 +185,13 @@ as `true` / `false` / `"unknown"` rather than `null`; new tool `grok_finalize`; 
   `sessionId`, or the latest session in `cwd`) with `maxTurns: 1` and a fixed prompt: stop using tools,
   emit the complete answer now, mark anything unverified as `UNVERIFIED`. It inherits the read-only
   mode of the session it resumes. Every partial-result message — `timeout`, `terminated`,
-  `max_turns_reached`, `cancelled_output` — now names it.
+  `max_turns_reached`, `cancelled_output` — now names it, and so does the other human-readable field
+  of the same envelope: `outputSummary.guidance` for a `timeout`, `terminated` or `max_turns_reached`
+  job is now exactly the typed error's remedy, instead of falling through to a generic failed branch
+  that said "rerun with a narrower prompt". A wall-clock timeout is the largest recorded failure
+  class (29 of 64), and it emits no stream event at all, so its guidance is derived from the stored
+  `error.code`. The remaining generic failure text no longer suggests narrowing either: it points at
+  `error.code` / `error.details` and the recovery handle.
 
 - **GPC-08 / GK3 / SPEC §D M3 — the budget is now stated to the delegate, and defaults per kind.**
   A turn or wall-clock limit with no answer used to be a total loss; plugin-built prompts
