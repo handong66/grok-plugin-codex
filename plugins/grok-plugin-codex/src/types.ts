@@ -140,6 +140,8 @@ export type JobOutputSummary = {
   outputTruncated: boolean;
   /** Answer text was actually evicted. Only this vetoes completeness. */
   textTruncated: boolean;
+  /** Interactive skill/persona files Grok opened during a headless delegation (X1). */
+  skillsLoaded: string[];
   eventCounts: Record<string, number>;
   grokSessionId?: string;
   requestId?: string;

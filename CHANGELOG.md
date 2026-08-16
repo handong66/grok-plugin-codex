@@ -45,6 +45,15 @@ All notable user-visible and contract changes to `grok-plugin-codex`.
 
 ### Added
 
+- **X1 — headless delegation preamble.** 57 of 128 recorded runs opened `~/.grok/skills/pua/SKILL.md` or a
+  Superpowers skill before starting the task, because the repository's own `AGENTS.md` tells every agent to;
+  12 of the 18 `max_turns_reached` jobs spent one of their first three reads on a `SKILL.md`. The prompts
+  built by `grok_review`, `grok_adversarial_review`, and `grok_rescue` now open by saying the run is a
+  headless, single-purpose delegation, that repository bootstrap instructions about interactive skills and
+  personas do not apply, and that the only text output is the final answer.
+- `outputSummary.skillsLoaded` lists the skill/persona files the delegate opened anyway, with a warning when
+  the list is non-empty.
+
 - **GPC-05 — recovery handles on every non-completion.** `grokSessionId` was written only when the caller
   supplied one, so 88 of 128 recorded jobs never had a resume handle: stdout carries `sessionId` only in the
   `end` event, which timed-out and killed runs never emit. When the installed CLI advertises

@@ -54,6 +54,26 @@ export function errorEventText(stdout: string): string {
   return messages.join("\n");
 }
 
+/**
+ * X1: a headless delegation that spends its first turns reading `~/.grok/skills/pua/SKILL.md` is
+ * burning the budget the task needed. 57 of 128 recorded runs did exactly that, so the loads are
+ * counted and surfaced instead of being invisible.
+ */
+const SKILL_LOAD_PATTERNS = [
+  /(?:\.grok|\.claude|\.codex|opencode)\/skills\/([A-Za-z0-9_.:-]+)/g,
+  /([A-Za-z0-9_.:-]+)\/SKILL\.md/g
+];
+
+function collectSkillLoads(line: string, into: Set<string>): void {
+  for (const pattern of SKILL_LOAD_PATTERNS) {
+    pattern.lastIndex = 0;
+    for (let match = pattern.exec(line); match; match = pattern.exec(line)) {
+      const name = match[1];
+      if (name && name !== "skills") into.add(name);
+    }
+  }
+}
+
 function previewText(text: string): string {
   const singleLine = text.replace(/\s+/g, " ").trim();
   return singleLine.length > 500 ? `${singleLine.slice(0, 497)}...` : singleLine;
@@ -116,6 +136,7 @@ export function summarizeGrokOutput(
   let thoughtEventCount = 0;
   let textEventCount = 0;
   let streamError: PluginErrorInfo | undefined;
+  const skillsLoaded = new Set<string>();
 
   for (const line of stdout.split(/\r?\n/)) {
     if (!line.trim()) continue;
@@ -132,6 +153,7 @@ export function summarizeGrokOutput(
     eventCounts[eventType] = (eventCounts[eventType] ?? 0) + 1;
     streamError ??= streamErrorFrom(event);
 
+    if (eventType.startsWith("tool_call") || eventType === "tool_use") collectSkillLoads(line, skillsLoaded);
     if (eventType === "thought") thoughtEventCount += 1;
     if (eventType === "text") {
       const text = eventText(event);
@@ -202,6 +224,12 @@ export function summarizeGrokOutput(
   if (outputTruncated && !textTruncated) {
     warnings.push("capture window overflowed, but only non-answer stream payload was dropped");
   }
+  if (skillsLoaded.size) {
+    warnings.push(
+      `Grok loaded ${skillsLoaded.size} interactive skill file(s) (${[...skillsLoaded].join(", ")}) during a ` +
+        "headless delegation; that spends turn and time budget on repository bootstrap instructions."
+    );
+  }
 
   return {
     resultComplete,
@@ -209,6 +237,7 @@ export function summarizeGrokOutput(
     finalText: finalText || undefined,
     outputTruncated,
     textTruncated,
+    skillsLoaded: [...skillsLoaded],
     eventCounts,
     grokSessionId,
     requestId,
