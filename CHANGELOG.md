@@ -200,8 +200,11 @@ as `true` / `false` / `"unknown"` rather than `null`; new tool `grok_finalize`; 
   `filesInspected`, `skillsLoaded`, `deniedToolCalls`, `turnsUsed` — as the stream arrives, using the
   same per-line observer as the fallback parse, so ledger and re-parse cannot drift. `result()` reads
   the ledger; a record written before 0.3.0, or an answer past the 4 M-character ledger ceiling, still
-  falls back to the full re-parse. Both new artifacts are in the strict pre-marker layout allowlist and
-  in `cleanupExpiredJobs`.
+  falls back to the full re-parse. A failed append to `<id>.final.txt` re-queues the delta it had
+  already consumed and marks the ledger untrusted (`ledgerWriteFailed`), so the same re-parse answers
+  instead of a file that is short a chunk; a write error can no longer shorten an answer that is still
+  reported as complete. Both new artifacts are in the strict pre-marker layout allowlist and in
+  `cleanupExpiredJobs`.
 
 - **GPC-07 — status could not say how far a run had got, and result could not be paged.**
   `toPublicJob` carried lifecycle fields only, so 730 recorded `grok_status` calls were followed by

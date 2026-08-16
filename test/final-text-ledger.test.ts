@@ -1,7 +1,10 @@
+import { randomUUID } from "node:crypto";
 import { mkdir, readFile, stat, writeFile } from "node:fs/promises";
 import { join } from "node:path";
 import { describe, expect, it } from "vitest";
 import { JobStore } from "../plugins/grok-plugin-codex/src/job-store.js";
+import { runJobWorker } from "../plugins/grok-plugin-codex/src/job-worker.js";
+import type { JobRecord } from "../plugins/grok-plugin-codex/src/types.js";
 import { makeExecutable, tempDir } from "./helpers.js";
 
 const TERMINAL = new Set(["succeeded", "failed", "cancelled"]);
@@ -109,4 +112,110 @@ describe("GPC-03b final-text ledger", () => {
 
     await expect(store.ensure()).resolves.toBeUndefined();
   });
+});
+
+const LEDGER_JOB_ID = "job_1700000000001_beefcafe";
+
+/**
+ * Points `<id>.final.txt` at a path *under* a file, so the append fails with ENOTDIR. The failing
+ * writes are chosen by call number rather than by the clock: call 1 is the worker creating the empty
+ * ledger, and every later call is one append of one consumed delta.
+ */
+class BrokenLedgerStore extends JobStore {
+  ledgerPathCalls = 0;
+  breakCall: (call: number) => boolean = () => false;
+
+  override finalTextPath(jobId: string): string {
+    const path = super.finalTextPath(jobId);
+    this.ledgerPathCalls += 1;
+    return this.breakCall(this.ledgerPathCalls) ? join(path, "unwritable") : path;
+  }
+}
+
+/** Streams the answer in three parts, so the run really does flush more than once. */
+async function pacedGrok(dir: string): Promise<string> {
+  return await makeExecutable(
+    join(dir, "paced-grok.mjs"),
+    [
+      "#!/usr/bin/env node",
+      "const args = process.argv.slice(2);",
+      "if (args[0] === '--version') { console.log('grok fake 1.0.3'); process.exit(0); }",
+      "if (args[0] === '--help') { console.log('--prompt-file --output-format streaming-json --permission-mode plan --no-subagents'); process.exit(0); }",
+      "const emit = (event) => console.log(JSON.stringify(event));",
+      "emit({ type: 'text', data: 'first ' });",
+      "setTimeout(() => {",
+      "  emit({ type: 'text', data: 'LOSTCHUNK' });",
+      "  setTimeout(() => {",
+      "    emit({ type: 'text', data: ' last' });",
+      "    emit({ type: 'end', stopReason: 'end_turn', sessionId: 'ledger-session', requestId: 'ledger-request' });",
+      "  }, 200);",
+      "}, 200);"
+    ].join("\n")
+  );
+}
+
+async function seedLedgerJob(store: JobStore, command: string, cwd: string): Promise<void> {
+  const record: JobRecord = {
+    id: LEDGER_JOB_ID,
+    kind: "run",
+    status: "queued",
+    cwd,
+    command,
+    args: ["--cwd", cwd, "--output-format", "streaming-json"],
+    createdAt: new Date().toISOString(),
+    timeoutMs: 15_000,
+    processToken: randomUUID(),
+    workerPid: process.pid
+  };
+  await store.write(record);
+  await writeFile(store.inputPath(LEDGER_JOB_ID), "ledger append failure", { mode: 0o600 });
+}
+
+/**
+ * GPC-03b's invariant is that the ledger and the fallback re-parse cannot disagree. A failed append
+ * is the one way they can: `takeText()` has already consumed the delta by the time the write throws.
+ */
+describe("GPC-03b ledger append failures", () => {
+  it("does not answer from a ledger whose append failed", async () => {
+    const dir = await tempDir();
+    const stateDir = await tempDir();
+    const store = new BrokenLedgerStore({ stateDir, env: { GROK_PLUGIN_STATE_DIR: stateDir } });
+    const grokBin = await pacedGrok(dir);
+    await seedLedgerJob(store, grokBin, dir);
+
+    // Every append fails, so the answer on disk stays short for the whole run.
+    store.breakCall = (call) => call > 1;
+    try {
+      await runJobWorker(LEDGER_JOB_ID, store);
+    } finally {
+      store.breakCall = () => false;
+    }
+
+    // The on-disk answer really is short, and the summary must say so instead of letting a reader
+    // serve a chunk-less answer with `sawEnd`/`stopReason` still claiming a clean end_turn.
+    expect(await readFile(store.finalTextPath(LEDGER_JOB_ID), "utf8")).not.toContain("LOSTCHUNK");
+    expect(await store.readStreamFacts(LEDGER_JOB_ID)).toBeUndefined();
+
+    const result = await store.result(LEDGER_JOB_ID);
+    expect(result.outputSummary.finalText).toBe("first LOSTCHUNK last");
+    expect(result.outputSummary.resultComplete).toBe(true);
+  }, 20_000);
+
+  it("re-queues the consumed delta so a transient append failure loses nothing", async () => {
+    const dir = await tempDir();
+    const stateDir = await tempDir();
+    const store = new BrokenLedgerStore({ stateDir, env: { GROK_PLUGIN_STATE_DIR: stateDir } });
+    const grokBin = await pacedGrok(dir);
+    await seedLedgerJob(store, grokBin, dir);
+
+    // Only the first append fails; the delta it consumed must come back on a later flush.
+    store.breakCall = (call) => call === 2;
+    try {
+      await runJobWorker(LEDGER_JOB_ID, store);
+    } finally {
+      store.breakCall = () => false;
+    }
+
+    expect(await readFile(store.finalTextPath(LEDGER_JOB_ID), "utf8")).toBe("first LOSTCHUNK last");
+  }, 20_000);
 });

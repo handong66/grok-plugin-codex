@@ -787,8 +787,16 @@ export class JobStore {
       return undefined;
     }
     if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) return undefined;
-    const summary = parsed as Partial<StreamFacts> & { version?: number; ledgerTruncated?: boolean };
-    if (summary.version !== STREAM_SUMMARY_VERSION || summary.ledgerTruncated) return undefined;
+    const summary = parsed as Partial<StreamFacts> & {
+      version?: number;
+      ledgerTruncated?: boolean;
+      ledgerWriteFailed?: boolean;
+    };
+    // A ledger that outgrew its cap, or one whose append failed, no longer matches `textChars`;
+    // either way the caller must re-parse rather than be served an answer that is short a chunk.
+    if (summary.version !== STREAM_SUMMARY_VERSION || summary.ledgerTruncated || summary.ledgerWriteFailed) {
+      return undefined;
+    }
     if (!summary.eventCounts || typeof summary.eventCounts !== "object") return undefined;
     return {
       eventCounts: summary.eventCounts,
@@ -814,8 +822,9 @@ export class JobStore {
 
   /**
    * GPC-03b: the worker's incremental ledger, when it exists and is intact. A record written before
-   * 0.3.0 — or one whose answer outgrew the ledger cap — returns `undefined`, and the caller falls
-   * back to the full re-parse that was the only path in 0.2.x.
+   * 0.3.0 — one whose answer outgrew the ledger cap, or one whose append to `<id>.final.txt` failed —
+   * returns `undefined`, and the caller falls back to the full re-parse that was the only path in
+   * 0.2.x. Serving a short ledger instead would publish a truncated answer as a complete one.
    */
   async readStreamFacts(jobId: string): Promise<StreamFacts | undefined> {
     const summary = await this.readStreamProgress(jobId);

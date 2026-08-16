@@ -88,6 +88,7 @@ class StreamLedger {
   private pendingLine = "";
   private pendingText = "";
   private writtenTextChars = 0;
+  private diskWriteFailed = false;
   /** The ledger is unbounded on disk, unlike the window, so it needs its own ceiling. */
   ledgerTruncated = false;
 
@@ -128,13 +129,38 @@ class StreamLedger {
     return text;
   }
 
+  /**
+   * The mirror of `StreamCapture.markDirty`: `takeText()` consumed the delta before the write was
+   * known to succeed, so a failed append must put it back or that much answer text is gone for good
+   * while `sawEnd`/`stopReason` still report a clean `end_turn` — a silent truncation published as
+   * `resultComplete: true`, the one way the ledger and the fallback re-parse can drift.
+   *
+   * The retry cannot prove what a partial append already wrote, so the on-disk ledger is also marked
+   * unusable: readers fall back to re-parsing the raw window instead of trusting a file that may be
+   * short a chunk or hold one twice. The in-memory facts are untouched and stay complete.
+   */
+  restoreText(text: string): void {
+    this.diskWriteFailed = true;
+    if (!text) return;
+    this.pendingText = text + this.pendingText;
+    this.writtenTextChars -= text.length;
+  }
+
   snapshot(): StreamFacts {
     return freezeStreamFacts(this.facts);
   }
 
   serialize(): string {
     return `${JSON.stringify(
-      { version: STREAM_SUMMARY_VERSION, ledgerTruncated: this.ledgerTruncated, ...this.snapshot(), finalText: undefined },
+      {
+        version: STREAM_SUMMARY_VERSION,
+        // Both mean the same thing to a reader: the answer in `<id>.final.txt` cannot be trusted to
+        // match `textChars`, so `readStreamProgress` rejects the summary and the re-parse takes over.
+        ledgerTruncated: this.ledgerTruncated || this.diskWriteFailed,
+        ledgerWriteFailed: this.diskWriteFailed,
+        ...this.snapshot(),
+        finalText: undefined
+      },
       null,
       2
     )}\n`;
@@ -310,11 +336,33 @@ export async function runJobWorker(jobId: string, store = new JobStore()): Promi
       throw error;
     }
   };
-  const flushLedger = async (): Promise<void> => {
-    const text = ledger.takeText();
-    if (text) await appendFile(store.finalTextPath(jobId), text, { mode: 0o600 });
+  const writeLedgerSummary = async (): Promise<void> => {
     await writeFile(store.summaryPath(jobId), ledger.serialize(), { mode: 0o600 });
     await chmod(store.summaryPath(jobId), 0o600);
+  };
+  const flushLedger = async (): Promise<void> => {
+    const text = ledger.takeText();
+    if (!text) {
+      await writeLedgerSummary();
+      return;
+    }
+    try {
+      await appendFile(store.finalTextPath(jobId), text, { mode: 0o600 });
+    } catch (error) {
+      // The delta was already consumed; without this the answer would lose it for good and still be
+      // reported complete. The summary is written before rethrowing because the "do not trust this
+      // ledger" marker it now carries is what keeps result() from serving the short file.
+      ledger.restoreText(text);
+      try {
+        await writeLedgerSummary();
+      } catch {
+        // Neither the text nor the marker reached disk. Drop the stale summary so the reader falls
+        // back to the re-parse rather than believing a summary that no longer describes the file.
+        await rm(store.summaryPath(jobId), { force: true }).catch(() => undefined);
+      }
+      throw error;
+    }
+    await writeLedgerSummary();
   };
   const flushLogs = () => {
     flushChain = flushChain.catch(() => undefined).then(async () => {

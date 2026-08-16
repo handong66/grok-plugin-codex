@@ -77,6 +77,13 @@ Adding, removing, or renaming a tool or argument must change the source schema a
   as the stream arrives. `JobStore.result()` reads that ledger; `grok_status` reads the summary alone
   for progress. Any new per-job artifact must be added to **both** the strict pre-marker layout
   allowlist and `cleanupExpiredJobs`, or `ensure()` will reject a real state directory.
+- Every flush consumes a delta from memory before it is durable, so a failed write must either put the
+  delta back or mark its artifact untrusted — never both dropped. `StreamCapture.markDirty` covers the
+  raw logs and `StreamLedger.restoreText` covers the answer: it re-queues the consumed text *and* sets
+  `ledgerWriteFailed`, which `readStreamProgress` treats exactly like `ledgerTruncated` so readers
+  re-parse instead of serving a file that may be short a chunk. Losing text silently here is the only
+  way the ledger and the fallback re-parse can disagree, and it would surface as a truncated answer
+  reported with `resultComplete: true`.
 - `JobStore.status()` is destructive: it reaps a job whose heartbeat is stale. The threshold is 10s, a
   stale reading must be confirmed a second time, and observed ledger progress vetoes the reap. Any
   change here must keep all three, and the `grok_status` description must keep saying the tool can reap.
