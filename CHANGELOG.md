@@ -6,6 +6,15 @@ All notable user-visible and contract changes to `grok-plugin-codex`.
 
 ### Fixed
 
+- **GPC-M2 — `grok_continue` dropped the read-only constraint (security).** `grokContinue` never set
+  `readOnly`, so a continuation never received `--permission-mode plan --no-subagents`, and because it uses
+  the mutable execution shape it also accepted `alwaysApprove`. All 40 recorded continues ran without plan
+  mode and two carried `--always-approve`; one of them resumed a real adversarial-review session. A session
+  this plugin created for a review, adversarial review, or rescue is now resumed in enforced read-only mode,
+  and `alwaysApprove` on such a session is refused with the non-retryable `readonly_session_escalation`
+  before any Grok process starts. When the session is unknown to the plugin the call proceeds with a warning
+  saying the original mode could not be verified. Job records carry `readOnly` for this lookup.
+
 - **GPC-01 — stop-reason vocabulary (contract).** Completion detection compared `stopReason` against the exact
   strings `"EndTurn"` / `"Cancelled"`, but Grok 1.0.x emits `end_turn` / `cancelled`, so `resultComplete` was
   false for every real run and complete answers were returned as `incomplete_output` with `data: null`.

@@ -155,7 +155,10 @@ server.registerTool(
   "grok_continue",
   {
     title: "Continue Grok Session",
-    description: "Continue a known Grok session or explicitly continue the latest session.",
+    description:
+      "Continue a known Grok session or explicitly continue the latest session. A session created by a " +
+      "read-only job (review, adversarial review, rescue) is resumed in enforced plan mode without " +
+      "subagents, and alwaysApprove on such a session is rejected with readonly_session_escalation.",
     inputSchema: {
       ...mutableExecutionShape,
       sessionId: z.string().trim().min(1).max(256).optional(),

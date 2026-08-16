@@ -310,6 +310,7 @@ export function buildContinueArgs(
   params: CommonArgs & {
     sessionId?: string;
     continueLatest?: boolean;
+    readOnly?: boolean;
     capabilities?: GrokCapabilities;
   }
 ): { args: string[]; warnings: string[] } {
@@ -377,7 +378,8 @@ async function runOrStartJob(params: CommonArgs & {
   return await guarded(async () => {
     const cwd = await resolveWorkspaceCwd(params.cwd, params._workspaceRoots, params.allowCodexPrivatePaths);
     validatePromptBoundary(params.prompt, params.allowCodexPrivatePaths);
-    const readOnly = params.readOnly ?? false;
+    let readOnly = params.readOnly ?? false;
+    const inheritedWarnings: string[] = [];
     const store = new JobStore();
     await assertStateOutsideWorkspace(store, cwd, params._workspaceRoots);
     if (process.platform !== "darwin" && process.platform !== "linux") {
@@ -394,12 +396,38 @@ async function runOrStartJob(params: CommonArgs & {
         throw new GrokPluginError("continue_target_required", "grok_continue requires sessionId or explicit continueLatest: true.");
       }
       if (params.sessionId) validateSessionId(params.sessionId);
+      // GPC-M2: `grok_continue` used the mutable execution shape and never set readOnly, so a session
+      // created under enforced `--permission-mode plan` could be resumed with full write permissions —
+      // observed once against a real adversarial-review session, and with `--always-approve` twice.
+      const origin = params.sessionId ? await store.findSessionOrigin(params.sessionId) : undefined;
+      if (origin?.readOnly) {
+        if (params.alwaysApprove === true) {
+          throw new GrokPluginError(
+            "readonly_session_escalation",
+            "This Grok session was created by an enforced read-only job, so it cannot be continued with " +
+              "alwaysApprove. Start a new mutable session instead of escalating a read-only one.",
+            false,
+            { sessionId: params.sessionId, originJobId: origin.jobId, originKind: origin.kind }
+          );
+        }
+        readOnly = true;
+        inheritedWarnings.push(
+          `Session ${params.sessionId} was created by a read-only ${origin.kind} job; this continuation ` +
+            "inherits enforced plan mode without subagents."
+        );
+      } else if (!origin) {
+        inheritedWarnings.push(
+          "This plugin has no record of the continued session, so its original read-only mode could not be " +
+            "verified; the continuation runs with the permissions given in this call."
+        );
+      }
     }
     const capabilities = await requiredRunCapabilities({ ...params, cwd, readOnly });
     const built =
       params.kind === "continue"
-        ? buildContinueArgs({ ...params, cwd, capabilities })
+        ? buildContinueArgs({ ...params, cwd, capabilities, readOnly })
         : buildRunArgs({ ...params, cwd, capabilities, readOnly });
+    built.warnings.unshift(...inheritedWarnings);
     const effectiveTimeoutMs = params.timeoutMs ?? DEFAULT_RUN_TIMEOUT_MS;
     const background = params.background ?? BACKGROUND_DEFAULT_BY_KIND[params.kind];
     if (!background && effectiveTimeoutMs > FOREGROUND_WARN_TIMEOUT_MS) {
@@ -423,7 +451,8 @@ async function runOrStartJob(params: CommonArgs & {
       args: built.args,
       prompt: params.prompt,
       timeoutMs: effectiveTimeoutMs,
-      grokSessionId: params.sessionId ?? assignedSessionId
+      grokSessionId: params.sessionId ?? assignedSessionId,
+      readOnly
     });
     if (background) {
       return success({ background: true, job: toPublicJob(job) }, built.warnings);

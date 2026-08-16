@@ -94,6 +94,8 @@ export type JobRecord = {
   /** Private opaque token inherited by the owned Grok process group. */
   processToken?: string;
   grokSessionId?: string;
+  /** True when the job ran under enforced `--permission-mode plan --no-subagents`. */
+  readOnly?: boolean;
   createdAt: string;
   startedAt?: string;
   finishedAt?: string;

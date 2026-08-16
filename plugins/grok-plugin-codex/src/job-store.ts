@@ -492,6 +492,34 @@ export class JobStore {
     return await this.read(jobId);
   }
 
+  /**
+   * GPC-M2: what a session is allowed to do is decided by the job that created it, not by the
+   * arguments of the call that resumes it. A session touched by any enforced read-only job stays
+   * read-only, so an adversarial-review session cannot be continued with write permissions.
+   */
+  async findSessionOrigin(
+    grokSessionId: string
+  ): Promise<{ jobId: string; kind: JobKind; readOnly: boolean } | undefined> {
+    await this.ensure();
+    const entries = await readdir(this.jobsDir(), { withFileTypes: true }).catch(() => []);
+    let origin: { jobId: string; kind: JobKind; readOnly: boolean; createdAt: number } | undefined;
+    for (const entry of entries) {
+      if (!entry.isFile() || !entry.name.endsWith(".json")) continue;
+      const jobId = entry.name.slice(0, -5);
+      if (!JOB_ID_PATTERN.test(jobId)) continue;
+      const record = await this.read(jobId).catch(() => null);
+      if (!record || record.grokSessionId !== grokSessionId) continue;
+      const createdAt = Date.parse(record.createdAt);
+      const readOnly = Boolean(record.readOnly) || Boolean(origin?.readOnly);
+      if (!origin || !Number.isFinite(origin.createdAt) || createdAt <= origin.createdAt) {
+        origin = { jobId, kind: record.kind, readOnly, createdAt };
+      } else {
+        origin = { ...origin, readOnly };
+      }
+    }
+    return origin ? { jobId: origin.jobId, kind: origin.kind, readOnly: origin.readOnly } : undefined;
+  }
+
   async startGrokJob(params: {
     kind: JobKind;
     cwd: string;
@@ -499,6 +527,7 @@ export class JobStore {
     prompt: string;
     timeoutMs?: number;
     grokSessionId?: string;
+    readOnly?: boolean;
   }): Promise<JobRecord> {
     await this.ensure();
     await this.cleanupExpiredJobs();
@@ -522,6 +551,7 @@ export class JobStore {
       command: discovered.bin,
       args: [...params.args],
       grokSessionId: params.grokSessionId,
+      readOnly: params.readOnly ?? false,
       createdAt: new Date().toISOString(),
       timeoutMs: params.timeoutMs ?? DEFAULT_TIMEOUT_MS,
       processToken: randomUUID()
