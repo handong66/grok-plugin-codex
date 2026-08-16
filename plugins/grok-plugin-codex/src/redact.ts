@@ -1,5 +1,5 @@
 import { homedir } from "node:os";
-import { dirname, isAbsolute, sep } from "node:path";
+import { dirname, isAbsolute, resolve, sep } from "node:path";
 
 /**
  * GPC-02's failure diagnostics (`errorMessage`, `stackTail`, `teardownError`, `workerLogTail`) are
@@ -59,6 +59,22 @@ export function redactDeviceCode(value: string): string {
  */
 export function defaultDiagnosticRedactor(env: NodeJS.ProcessEnv = process.env): PathRedactor {
   return createPathRedactor([{ path: env.HOME ?? homedir(), label: "<home>" }]);
+}
+
+/**
+ * X2: the redaction roots include `<home>`, and the normal workspace layout is a directory under the
+ * user's home, so redacting a collected path unconditionally rewrote the caller's own files to
+ * `<home>/…` and destroyed the one thing `filesInspected` is for — letting the caller check which
+ * files a review actually opened. A path inside the workspace this job ran in is the caller's own
+ * choice of location (docs/privacy.md), so it is returned verbatim; everything else — including the
+ * `~/.grok/skills/…` locations Grok picks on its own — still goes through `redact`. Only whole-path
+ * values may use this: it matches a prefix, so it is not safe for free-form prose.
+ */
+export function exemptWorkspacePaths(redact: PathRedactor, workspaceDir: string | undefined): PathRedactor {
+  const root = normaliseRoot(workspaceDir ? resolve(workspaceDir) : "");
+  if (!isAbsolute(root) || root.split(sep).filter(Boolean).length < 1) return redact;
+  const prefix = `${root}${sep}`;
+  return (value) => (value === root || value.startsWith(prefix) ? value : redact(value));
 }
 
 /**

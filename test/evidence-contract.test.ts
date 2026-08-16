@@ -137,6 +137,26 @@ describe("evidence contract (X2 / GK2)", () => {
     expect(summary.filesInspected).toContain("/repo/src/index.ts");
   });
 
+  it("keeps workspace files verbatim when the workspace itself is under the home directory", () => {
+    const home = process.env.HOME ?? "/home/nobody";
+    const workspace = `${home}/Downloads/grok-plugin-codex`;
+    const stream = [
+      JSON.stringify({ type: "tool_call", toolCallId: "t1", rawInput: { path: `${workspace}/src/tools.ts` } }),
+      JSON.stringify({ type: "tool_call", toolCallId: "t2", rawInput: { path: `${home}/.grok/skills/pua/SKILL.md` } }),
+      JSON.stringify({ type: "text", data: "x".repeat(500) }),
+      JSON.stringify({ type: "end", stopReason: "end_turn" })
+    ].join("\n");
+
+    const summary = summarizeGrokOutput({ ...record("review"), cwd: workspace }, stream);
+
+    // A workspace under $HOME is the normal layout. Rewriting it to `<home>/…` would leave the caller
+    // unable to resolve the evidence this field exists to provide, and would contradict the promise in
+    // docs/privacy.md that caller-chosen locations are not rewritten.
+    expect(summary.filesInspected).toContain(`${workspace}/src/tools.ts`);
+    // Grok's own choices outside the workspace are still redacted, even though they share the root.
+    expect(summary.filesInspected).toContain("<home>/.grok/skills/pua/SKILL.md");
+  });
+
   it("redacts the private state directory out of a public grok_result", async () => {
     const dir = await tempDir();
     const stateDir = await tempDir();

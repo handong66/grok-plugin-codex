@@ -6,7 +6,7 @@ import {
   grokFailureMessage,
   isRetryableGrokFailure
 } from "./grok-cli.js";
-import { defaultDiagnosticRedactor, type PathRedactor } from "./redact.js";
+import { defaultDiagnosticRedactor, exemptWorkspacePaths, type PathRedactor } from "./redact.js";
 
 /** Grok has shipped both `EndTurn` and `end_turn`; compare on a case/separator-free form. */
 export function normalizeStopReason(value: string | undefined): string {
@@ -102,6 +102,11 @@ const FILE_PATH_KEYS = new Set(["path", "file", "file_path", "filePath", "filena
  * locations outside the workspace routinely land in this public array. Every free-form diagnostic
  * field goes through the redactor before it leaves the process (docs/privacy.md), and redacting on
  * insertion also keeps the de-duplication working on the value that is actually returned.
+ *
+ * The redactor handed in here is wrapped by `exemptWorkspacePaths` first: `<home>` would otherwise
+ * swallow the caller's own workspace whenever it lives under the home directory — the normal layout —
+ * and an array of `<home>/…` strings cannot be resolved back to the files the review claims to have
+ * read, which is the whole purpose of the field.
  */
 function collectInspectedFiles(value: unknown, into: Set<string>, redact: PathRedactor, depth = 0): void {
   if (depth > 6 || into.size > 200) return;
@@ -204,6 +209,8 @@ export function summarizeGrokOutput(
   const skillsLoaded = new Set<string>();
   const toolCallIds = new Set<string>();
   const filesInspected = new Set<string>();
+  /** Files inside the workspace this job ran in are the caller's own location and stay verbatim. */
+  const redactInspectedPath = exemptWorkspacePaths(redact, record.cwd);
   let toolEventCount = 0;
   let turnsUsed: number | undefined;
 
@@ -227,7 +234,7 @@ export function summarizeGrokOutput(
       toolEventCount += 1;
       const id = toolCallIdOf(event);
       if (id) toolCallIds.add(id);
-      collectInspectedFiles(event, filesInspected, redact);
+      collectInspectedFiles(event, filesInspected, redactInspectedPath);
     }
     if (eventType === "thought") thoughtEventCount += 1;
     if (eventType === "text") {

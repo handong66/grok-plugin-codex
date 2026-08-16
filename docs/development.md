@@ -112,6 +112,12 @@ applies it as each path is collected. `JobStore.result()` and the worker pass th
 a direct parser caller gets the home-directory fallback (`defaultDiagnosticRedactor`). `skillsLoaded`
 needs no redaction because it stores the extracted skill name, not the path it came from.
 
+That redactor is wrapped in `exemptWorkspacePaths(redact, record.cwd)` first, so a path inside the job's
+own workspace is returned verbatim. Without it, `<home>` rewrites the caller's files as soon as the
+workspace sits under the home directory — the normal layout — and `filesInspected` stops being usable as
+the evidence record it exists to be. The exemption matches a whole-path prefix and is therefore only for
+collected path values, never for free-form prose; the free-form diagnostics keep the unwrapped redactor.
+
 ## Local upgrade loop
 
 Codex caches local plugins by manifest version. During local iteration, update the manifest cachebuster with the `plugin-creator` helper when available, keep that single `+codex.<cachebuster>` suffix in the source manifest while the local marketplace points at the working repository, reinstall from the confirmed local marketplace, and start a new Codex task. The package and MCP server continue to advertise the base release version. Do not hand-edit Codex cache contents.

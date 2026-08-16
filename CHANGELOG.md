@@ -74,7 +74,7 @@ All notable user-visible and contract changes to `grok-plugin-codex`.
   Grok chose rather than the caller — the recorded delegates opened `~/.grok/skills/pua/SKILL.md` — so it goes
   through the same path redactor as the other free-form diagnostics: the state directory reads `<state>`, the
   install directory `<plugin>`, the home directory `<home>`, while files inside the caller's workspace stay
-  verbatim.
+  verbatim — including a workspace that lives under the home directory, which is the normal layout.
 - **X2 — a cancelled stop reason is no longer stored as `succeeded`.** 24 of 64 recorded jobs ended with
   `stopReason: cancelled` and were persisted as `succeeded`; the worker now records them as `cancelled`.
 - **X2 — review output contract.** `grok_adversarial_review` no longer asks for "at most 5 findings", which
