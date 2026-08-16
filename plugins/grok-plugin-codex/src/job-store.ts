@@ -27,7 +27,14 @@ export type JobStoreOptions = {
 
 const DEFAULT_TIMEOUT_MS = 600_000;
 const WORKER_STARTUP_GRACE_MS = 5_000;
-const WORKER_HEARTBEAT_STALE_MS = 5_000;
+/**
+ * GPC-M3: `status()` is destructive — it kills the process tree of a job whose heartbeat looks stale,
+ * and `grok_status`/`grok_result` both go through it, at up to 20Hz before GPC-09. 5s was two flush
+ * cycles away from a healthy worker under load. The threshold is now 10s, a stale verdict must be
+ * confirmed a second time after a real interval, and observed stream progress vetoes it outright.
+ */
+export const WORKER_HEARTBEAT_STALE_MS = 10_000;
+const STALE_CONFIRM_DELAY_MS = 1_000;
 const MAX_RESULT_CHARS = 100_000;
 const WORKER_LOG_TAIL_CHARS = 4_000;
 const SUMMARY_READ_CHARS = 1_000_000;
@@ -513,9 +520,14 @@ export class JobStore {
       if (Number.isFinite(createdAtMs) && Date.now() - createdAtMs <= WORKER_STARTUP_GRACE_MS) return record;
     }
     if (await this.hasFreshHeartbeat(jobId)) return record;
-    await new Promise((resolvePromise) => setTimeout(resolvePromise, 25));
+    // One stale reading is not evidence: confirm it after a real interval, and let any stream event
+    // observed in between prove the run is alive even though the heartbeat write is behind.
+    const progressBefore = (await this.readStreamProgress(jobId))?.lastEventAt;
+    await new Promise((resolvePromise) => setTimeout(resolvePromise, STALE_CONFIRM_DELAY_MS));
     record = await this.read(jobId);
     if (TERMINAL_STATUSES.has(record.status) || (await this.hasFreshHeartbeat(jobId))) return record;
+    const progressAfter = (await this.readStreamProgress(jobId))?.lastEventAt;
+    if (progressAfter && progressAfter !== progressBefore) return record;
     await this.terminateOwnedProcessTree(record);
     record = await this.read(jobId);
     if (TERMINAL_STATUSES.has(record.status) || (await this.hasFreshHeartbeat(jobId))) return record;

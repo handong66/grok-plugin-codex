@@ -229,9 +229,9 @@ describe("background lifecycle across MCP restarts", () => {
         "const args = process.argv.slice(2);",
         "if (args[0] === '--version') { console.log('grok 0.2.93'); process.exit(0); }",
         "if (args[0] === '--help') { console.log('--prompt-file --output-format streaming-json --permission-mode plan --no-subagents --disable-web-search'); process.exit(0); }",
-        `spawn(process.execPath, ['-e', ${JSON.stringify(`setTimeout(() => require('node:fs').writeFileSync(${JSON.stringify(marker)}, 'completed'), 8000)`) }], { stdio: 'ignore' });`,
+        `spawn(process.execPath, ['-e', ${JSON.stringify(`setTimeout(() => require('node:fs').writeFileSync(${JSON.stringify(marker)}, 'completed'), 20000)`) }], { stdio: 'ignore' });`,
         "console.log(JSON.stringify({ type: 'text', data: 'orphan probe running' }));",
-        "setTimeout(() => console.log(JSON.stringify({ type: 'end', sessionId: 'late-orphan' })), 12000);"
+        "setTimeout(() => console.log(JSON.stringify({ type: 'end', sessionId: 'late-orphan' })), 25000);"
       ].join("\n")
     );
     const env = { ...process.env, GROK_BIN: grokBin, GROK_PLUGIN_STATE_DIR: stateDir };
@@ -252,7 +252,9 @@ describe("background lifecycle across MCP restarts", () => {
 
     process.kill(running.workerPid, "SIGKILL");
     try {
-      await new Promise((resolvePromise) => setTimeout(resolvePromise, 5_300));
+      // GPC-M3 raised the staleness threshold to 10s and requires a confirmed second reading, so a
+      // reap is only expected after that budget, not after the old 5s one.
+      await new Promise((resolvePromise) => setTimeout(resolvePromise, 11_000));
       const result = await call(client, "grok_result", { jobId, includeRawTail: true });
       expect(result.job.status).toBe("failed");
       expect(result.job.error.code).toBe("worker_unavailable");

@@ -95,6 +95,13 @@ All notable user-visible and contract changes to `grok-plugin-codex`.
   longer serialised twice in one envelope. The `includeRawTail: false` default is the one shared with
   GPC-03a, implemented once.
 
+- **GPC-M3 — `JobStore.status()` could kill a healthy job.** `status()` terminates the process tree of
+  a job whose heartbeat is stale, and both `grok_status` and `grok_result` go through it — up to 20 Hz
+  before GPC-09. The threshold was 5 s, about two flush cycles from a busy worker. It is now 10 s, a
+  stale reading must be confirmed a second time after a full second, and stream progress observed in
+  between vetoes the reap outright. The `grok_status` description now says the tool can reap a job.
+  (No `worker_unavailable` was ever recorded, so this is hardening, not a fix.)
+
 - **GK1 — device-authorization hang.** When the CLI's device authorization has expired it prints a sign-in
   URL to stderr and waits for a browser that a headless job can never open, while `grok_status` still said
   `running`; three recorded jobs sat there, one for the full 600 000 ms, during an unattended overnight run.

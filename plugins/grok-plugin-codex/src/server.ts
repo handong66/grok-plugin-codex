@@ -246,7 +246,7 @@ server.registerTool(
       "no grok_result call. Typical wall time on this machine: continue ~62s, run ~129s, review ~171s, " +
       "adversarial_review ~223s (median). Do not cancel before timeoutMs unless job.waitingForAuth is " +
       "true or eventCounts/lastEventAt have not moved for more than 45s. Note that reading status may " +
-      "reap a job whose worker is gone: a run with no heartbeat for 15s and no progress is recorded as " +
+      "reap a job whose worker is gone: a run with no heartbeat for 10s, confirmed a second time and with no stream progress in between, is recorded as " +
       "worker_unavailable.",
     inputSchema: {
       jobId: jobIdSchema,
