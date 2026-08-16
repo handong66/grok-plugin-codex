@@ -105,6 +105,10 @@ export type JobRecord = {
   error?: PluginErrorInfo;
   cancelRequestedAt?: string;
   outputTruncated?: boolean;
+  /** True only when the capture window evicted `text`-event characters, i.e. answer text was lost. */
+  textTruncated?: boolean;
+  /** Characters of `text`-event payload retained for this job. */
+  textChars?: number;
 };
 
 export type PublicJob = {
@@ -132,7 +136,10 @@ export type JobOutputSummary = {
     | "succeeded_with_text"
     | "succeeded_without_text";
   finalText?: string;
+  /** The shared capture window overflowed; most of that window is tool echo. */
   outputTruncated: boolean;
+  /** Answer text was actually evicted. Only this vetoes completeness. */
+  textTruncated: boolean;
   eventCounts: Record<string, number>;
   grokSessionId?: string;
   requestId?: string;

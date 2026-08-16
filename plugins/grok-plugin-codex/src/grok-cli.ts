@@ -68,7 +68,9 @@ export function buildGrokProcessEnv(env: NodeJS.ProcessEnv = process.env): NodeJ
 
 export function buildWorkerEnv(env: NodeJS.ProcessEnv = process.env): NodeJS.ProcessEnv {
   const filtered = buildGrokProcessEnv(env);
-  for (const key of ["GROK_PLUGIN_STATE_DIR", "GROK_PLUGIN_WORKER_PATH"] as const) {
+  // GROK_PLUGIN_RAW_CAPTURE is a plugin-development escape hatch that must reach the worker, which
+  // is the process that decides whether to elide oversized tool payloads.
+  for (const key of ["GROK_PLUGIN_STATE_DIR", "GROK_PLUGIN_WORKER_PATH", "GROK_PLUGIN_RAW_CAPTURE"] as const) {
     if (env[key] !== undefined) filtered[key] = env[key];
   }
   return filtered;

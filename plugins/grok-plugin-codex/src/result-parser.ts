@@ -150,6 +150,10 @@ export function summarizeGrokOutput(
 
   const finalText = textChunks.join("");
   const warnings: string[] = [];
+  // GPC-03a: `outputTruncated` means the shared capture window overflowed, and 84.6% of that window
+  // is tool echo. Only `textTruncated` — set by the worker when evicted characters actually came
+  // from `text` events — can hide the answer, so only it may veto completeness.
+  const textTruncated = record.textTruncated ?? outputTruncated;
   const stopReasonNormalized = normalizeStopReason(stopReason);
   const stopReasonRecognised =
     NORMAL_COMPLETION_STOP_REASONS.has(stopReasonNormalized) || CANCELLED_STOP_REASONS.has(stopReasonNormalized);
@@ -163,7 +167,7 @@ export function summarizeGrokOutput(
       // Fail open on an unfamiliar vocabulary: a stream that ended with real text is a
       // completion, and 0.2.1's exact-match rule silently destroyed those answers. The
       // raw value plus stopReasonRecognised lets a strict caller still reject it.
-      const endedWithText = Boolean(sawEnd && finalText.trim() && !outputTruncated);
+      const endedWithText = Boolean(sawEnd && finalText.trim() && !textTruncated);
       state = endedWithText ? "succeeded_with_text" : "succeeded_without_text";
       if (endedWithText && !stopReasonRecognised) {
         warnings.push(`unrecognised stopReason "${stopReason ?? ""}"; treated as normal completion`);
@@ -177,8 +181,8 @@ export function summarizeGrokOutput(
   let guidance: string;
   if (resultComplete) {
     guidance = "Grok produced complete final text. Codex must still verify findings against the workspace before acting on them.";
-  } else if (outputTruncated) {
-    guidance = "Grok output exceeded the capture limit. Returned text is incomplete and must not be treated as a final result.";
+  } else if (textTruncated) {
+    guidance = "Grok output exceeded the capture limit and answer text was dropped. Returned text is incomplete and must not be treated as a final result.";
   } else if (record.status === "running" || record.status === "queued") {
     guidance = "Grok is still running. Poll result later or cancel and rerun with a narrower target.";
   } else if (streamError?.code === "max_turns_reached") {
@@ -195,11 +199,16 @@ export function summarizeGrokOutput(
     guidance = "Grok exited successfully but did not emit non-empty text with a normal end event.";
   }
 
+  if (outputTruncated && !textTruncated) {
+    warnings.push("capture window overflowed, but only non-answer stream payload was dropped");
+  }
+
   return {
     resultComplete,
     state,
     finalText: finalText || undefined,
     outputTruncated,
+    textTruncated,
     eventCounts,
     grokSessionId,
     requestId,

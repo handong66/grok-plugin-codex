@@ -1,6 +1,6 @@
 #!/usr/bin/env node
 import { closeSync } from "node:fs";
-import { chmod, readFile, rm, stat, writeFile } from "node:fs/promises";
+import { appendFile, chmod, readFile, rm, stat, writeFile } from "node:fs/promises";
 import { execFile, spawn, type ChildProcess } from "node:child_process";
 import { pathToFileURL } from "node:url";
 import { promisify } from "node:util";
@@ -17,6 +17,7 @@ import {
 import { JobStore } from "./job-store.js";
 import type { PathRedactor } from "./redact.js";
 import { errorEventText, summarizeGrokOutput } from "./result-parser.js";
+import { StreamCapture, type CaptureWrite } from "./stream-capture.js";
 import type { JobRecord } from "./types.js";
 
 const MAX_CAPTURE_CHARS = 1_000_000;
@@ -52,10 +53,13 @@ function describeFailure(
   };
 }
 
-function appendTail(current: string, chunk: string): { value: string; truncated: boolean } {
-  const combined = current + chunk;
-  if (combined.length <= MAX_CAPTURE_CHARS) return { value: combined, truncated: false };
-  return { value: combined.slice(-MAX_CAPTURE_CHARS), truncated: true };
+function newCapture(lineOriented: boolean): StreamCapture {
+  return new StreamCapture({
+    maxChars: MAX_CAPTURE_CHARS,
+    lineOriented,
+    // Escape hatch for plugin development: keep the vendor stream byte-for-byte.
+    raw: process.env.GROK_PLUGIN_RAW_CAPTURE === "1"
+  });
 }
 
 async function waitForReadyRecord(store: JobStore, jobId: string): Promise<JobRecord> {
@@ -80,6 +84,19 @@ async function waitForPromptInput(store: JobStore, jobId: string): Promise<strin
 async function writeLog(path: string, value: string): Promise<void> {
   await writeFile(path, value, { mode: 0o600 });
   await chmod(path, 0o600);
+}
+
+/**
+ * GPC-03a: the previous flush rewrote both whole log files every 25ms, so a 1MB stream cost tens of
+ * gigabytes of writes. Only the delta is written unless the bounded window evicted something.
+ */
+async function applyCaptureWrite(path: string, write: CaptureWrite): Promise<void> {
+  if (write.mode === "rewrite") {
+    await writeLog(path, write.value);
+    return;
+  }
+  if (!write.value) return;
+  await appendFile(path, write.value, { mode: 0o600 });
 }
 
 async function deliverPrompt(pipe: NodeJS.WritableStream | null, prompt: string): Promise<void> {
@@ -175,9 +192,8 @@ export async function runJobWorker(jobId: string, store = new JobStore()): Promi
   await rm(inputPath, { force: true });
 
   let child: ChildProcess | null = null;
-  let stdout = "";
-  let stderr = "";
-  let outputTruncated = false;
+  const stdoutCapture = newCapture(true);
+  const stderrCapture = newCapture(false);
   let promptDeliveryError: Error | undefined;
   let teardownError: string | undefined;
   let timedOut = false;
@@ -191,13 +207,22 @@ export async function runJobWorker(jobId: string, store = new JobStore()): Promi
   let heartbeatChain = Promise.resolve();
   let cancelPollPromise = Promise.resolve();
 
+  const flushCapture = async (capture: StreamCapture, path: string): Promise<void> => {
+    const write = capture.takeWrite();
+    if (!write) return;
+    try {
+      await applyCaptureWrite(path, write);
+    } catch (error) {
+      // The delta was already consumed; without this the failed bytes would be lost for good.
+      capture.markDirty();
+      throw error;
+    }
+  };
   const flushLogs = () => {
-    const stdoutSnapshot = stdout;
-    const stderrSnapshot = stderr;
     flushChain = flushChain.catch(() => undefined).then(async () => {
       await Promise.all([
-        writeLog(store.stdoutPath(jobId), stdoutSnapshot),
-        writeLog(store.stderrPath(jobId), stderrSnapshot)
+        flushCapture(stdoutCapture, store.stdoutPath(jobId)),
+        flushCapture(stderrCapture, store.stderrPath(jobId))
       ]);
     });
     void flushChain.catch(() => undefined);
@@ -293,15 +318,11 @@ export async function runJobWorker(jobId: string, store = new JobStore()): Promi
       signalProcessTree(child, "SIGTERM");
     });
     child.stdout?.on("data", (chunk: string) => {
-      const appended = appendTail(stdout, chunk);
-      stdout = appended.value;
-      outputTruncated ||= appended.truncated;
+      stdoutCapture.append(chunk);
       scheduleFlush();
     });
     child.stderr?.on("data", (chunk: string) => {
-      const appended = appendTail(stderr, chunk);
-      stderr = appended.value;
-      outputTruncated ||= appended.truncated;
+      stderrCapture.append(chunk);
       scheduleFlush();
     });
     record.pid = child.pid;
@@ -321,6 +342,8 @@ export async function runJobWorker(jobId: string, store = new JobStore()): Promi
     try {
       signalPidTree(launcherPid, "SIGKILL");
       await Promise.all([promptDelivery, streamsClosedPromise]);
+      stdoutCapture.finish();
+      stderrCapture.finish();
       await flushLogs();
     } catch (error) {
       teardownError = store.redactDiagnostics(
@@ -335,10 +358,17 @@ export async function runJobWorker(jobId: string, store = new JobStore()): Promi
       if (flushTimer) clearTimeout(flushTimer);
     }
 
+    const stdout = stdoutCapture.value;
+    const stderr = stderrCapture.value;
+    const outputTruncated = stdoutCapture.truncated || stderrCapture.truncated;
     const latest = await store.read(jobId);
     latest.exitCode = outcome.exitCode;
     latest.signal = outcome.signal;
     latest.outputTruncated = outputTruncated;
+    // GPC-03a: only evicted *answer* text can hide a complete result. Tool echo overflowing the
+    // capture window used to force `resultComplete: false` on four otherwise complete answers.
+    latest.textTruncated = stdoutCapture.droppedTextChars > 0;
+    latest.textChars = stdoutCapture.textChars;
     latest.finishedAt = new Date().toISOString();
     if (latest.status === "cancelled" || latest.cancelRequestedAt || cancelRequested) {
       latest.status = "cancelled";

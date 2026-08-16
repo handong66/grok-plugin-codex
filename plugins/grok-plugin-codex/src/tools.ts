@@ -796,7 +796,7 @@ export async function grokStatus(args: { jobId: string }) {
   return await guarded(async () => success({ job: toPublicJob(await new JobStore().status(args.jobId)) }));
 }
 
-export async function grokResult(args: { jobId: string; maxChars?: number }) {
+export async function grokResult(args: { jobId: string; maxChars?: number; includeRawTail?: boolean }) {
   return await guarded(async () => {
     const result = await new JobStore().result(args.jobId, args.maxChars);
     // Full captured text is returned whatever `resultComplete` says; a partial answer that was
@@ -813,8 +813,9 @@ export async function grokResult(args: { jobId: string; maxChars?: number }) {
     return success(
       {
         job: toPublicJob(result.record),
-        stdoutTail: result.stdout,
-        stderrTail: result.stderr,
+        // GPC-03a: the raw tails were 30-40k characters of per-token JSON duplicating finalText on
+        // every one of 656 recorded result calls. They are diagnostics, returned only on request.
+        ...(args.includeRawTail === true ? { stdoutTail: result.stdout, stderrTail: result.stderr } : {}),
         outputSummary: result.outputSummary,
         finalText: result.outputSummary.finalText,
         resultComplete: complete,

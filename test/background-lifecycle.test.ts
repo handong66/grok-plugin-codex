@@ -105,14 +105,14 @@ describe("background lifecycle across MCP restarts", () => {
 
     const second = await createClient(env, workspace);
     await waitFor(
-      () => call(second, "grok_result", { jobId }),
+      () => call(second, "grok_result", { jobId, includeRawTail: true }),
       (data) => data.stdoutTail.includes("working before restart")
     );
     const cancelled = await call(second, "grok_cancel", { jobId });
     expect(cancelled.job.status).toBe("cancelled");
     await new Promise((resolvePromise) => setTimeout(resolvePromise, 900));
 
-    const result = await call(second, "grok_result", { jobId });
+    const result = await call(second, "grok_result", { jobId, includeRawTail: true });
     expect(result.resultComplete).toBe(false);
     expect(result.outputSummary.state).toBe("cancelled_partial");
     expect(existsSync(marker)).toBe(false);
@@ -162,7 +162,7 @@ describe("background lifecycle across MCP restarts", () => {
 
     const second = await createClient(env, workspace);
     const result = await waitFor(
-      () => call(second, "grok_result", { jobId }),
+      () => call(second, "grok_result", { jobId, includeRawTail: true }),
       (data) => data.resultComplete === true
     );
 
@@ -204,7 +204,7 @@ describe("background lifecycle across MCP restarts", () => {
     const jobId = started.job.id as string;
 
     const result = await waitFor(
-      () => call(client, "grok_result", { jobId }),
+      () => call(client, "grok_result", { jobId, includeRawTail: true }),
       (data) => data.job.status === "failed"
     );
     await new Promise((resolvePromise) => setTimeout(resolvePromise, 800));
@@ -253,7 +253,7 @@ describe("background lifecycle across MCP restarts", () => {
     process.kill(running.workerPid, "SIGKILL");
     try {
       await new Promise((resolvePromise) => setTimeout(resolvePromise, 5_300));
-      const result = await call(client, "grok_result", { jobId });
+      const result = await call(client, "grok_result", { jobId, includeRawTail: true });
       expect(result.job.status).toBe("failed");
       expect(result.job.error.code).toBe("worker_unavailable");
       await new Promise((resolvePromise) => setTimeout(resolvePromise, 3_000));
@@ -354,7 +354,7 @@ describe("background lifecycle across MCP restarts", () => {
       (record) => record.status === "running" && typeof record.pid === "number" && typeof record.workerPid === "number"
     );
     await waitFor(
-      () => call(client, "grok_result", { jobId }),
+      () => call(client, "grok_result", { jobId, includeRawTail: true }),
       (data) => data.stdoutTail.includes("ready for lost-worker cancel")
     );
 
@@ -407,13 +407,13 @@ describe("background lifecycle across MCP restarts", () => {
       (record) => record.status === "running" && typeof record.pid === "number"
     );
     await waitFor(
-      () => call(client, "grok_result", { jobId }),
+      () => call(client, "grok_result", { jobId, includeRawTail: true }),
       (data) => data.stdoutTail.includes("ready for launcher loss")
     );
 
     process.kill(running.pid, "SIGKILL");
     const result = await waitFor(
-      () => call(client, "grok_result", { jobId }),
+      () => call(client, "grok_result", { jobId, includeRawTail: true }),
       (data) => data.job.status === "failed"
     );
     expect(result.job.error.code).toBe("terminated");

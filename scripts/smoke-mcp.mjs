@@ -120,7 +120,7 @@ const expectedSchemas = {
     required: ["jobId"]
   },
   grok_result: {
-    properties: ["jobId", "maxChars"],
+    properties: ["includeRawTail", "jobId", "maxChars"],
     required: ["jobId"]
   },
   grok_cancel: {

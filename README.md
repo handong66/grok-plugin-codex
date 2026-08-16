@@ -96,12 +96,13 @@ Dispatch tools (`grok_run`, `grok_review`, `grok_adversarial_review`, `grok_resc
 
 ```text
 data.resultComplete === true
-data.outputTruncated === false
 ```
 
 Internally, completeness also requires non-empty final text and a normal end event. Stop reasons are normalised case- and separator-insensitively (`end_turn` and `EndTurn` are the same fact), the raw value is preserved in `outputSummary.stopReason`, and callers must not string-match it themselves. A cancelled end is returned as `cancelled_output`; `max_turns_reached` asks the caller to narrow the target or increase `maxTurns`. An unrecognised stop reason after real text is accepted with `stopReasonRecognised: false` plus a warning instead of being discarded. All paths preserve bounded recovery metadata without promoting partial text to a conclusion.
 
-Use `data.finalText`. Raw tails and partial states are diagnostics only. Terminal job artifacts are retained for seven days and cleaned opportunistically.
+`resultComplete` accounts for truncation itself: `outputTruncated` only says the shared capture window overflowed, which is normally tool-call echo, while `textTruncated` says answer text was dropped and is the flag that vetoes completeness. Oversized tool payloads are elided at capture time and `available_commands` payloads are dropped; set `GROK_PLUGIN_RAW_CAPTURE=1` to keep the vendor stream verbatim for plugin development.
+
+Use `data.finalText`. Partial states are diagnostics only, and the raw per-token log tails are returned only when `grok_result` is called with `includeRawTail: true`. Terminal job artifacts are retained for seven days and cleaned opportunistically.
 
 ## Upgrading from 0.1
 

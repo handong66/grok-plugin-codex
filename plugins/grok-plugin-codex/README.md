@@ -38,10 +38,11 @@ Background state lives under `$GROK_PLUGIN_STATE_DIR`, otherwise `$XDG_STATE_HOM
 
 ```text
 data.resultComplete === true
-data.outputTruncated === false
 ```
 
-Use `data.finalText` for the captured answer. `stdoutTail`, `stderrTail`, partial states, and previews are diagnostics only.
+`resultComplete` already accounts for truncation. `outputSummary.outputTruncated` means the shared capture window overflowed — usually with tool-call echo, which is 84.6 % of a typical Grok stream — and on its own it no longer disqualifies an answer. `outputSummary.textTruncated` is the flag that means answer text was actually dropped, and only that vetoes completeness.
+
+Use `data.finalText` for the captured answer; it is returned whatever `resultComplete` says. Partial states and previews are diagnostics only, and the raw per-token `stdoutTail` / `stderrTail` are returned only when `grok_result` is called with `includeRawTail: true`.
 
 Completeness requires non-empty final text and a normal end event. The plugin normalises `stopReason` case- and separator-insensitively, so `end_turn` and `EndTurn` (and `cancelled`/`Cancelled`/`canceled`) are all recognised; callers must not string-match the raw value. The raw value stays in `outputSummary.stopReason`, the compared form in `stopReasonNormalized`. Cancelled output is partial and surfaces as `cancelled_output`; `max_turns_reached` is a typed retryable failure. Use the returned session and bounded diagnostic metadata to continue or rerun narrowly.
 

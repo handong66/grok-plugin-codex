@@ -245,8 +245,20 @@ server.registerTool(
   "grok_result",
   {
     title: "Grok Job Result",
-    description: "Return bounded logs plus full captured final text; only resultComplete=true is final.",
-    inputSchema: { jobId: jobIdSchema, maxChars: z.number().int().positive().max(100_000).optional() },
+    description:
+      "Return the full captured final text plus the output summary; only resultComplete=true is final. " +
+      "Raw per-token log tails are omitted unless includeRawTail is true.",
+    inputSchema: {
+      jobId: jobIdSchema,
+      maxChars: z.number().int().positive().max(100_000).optional(),
+      includeRawTail: z
+        .boolean()
+        .optional()
+        .describe(
+          "Default false. true adds stdoutTail/stderrTail: tens of thousands of characters of per-token " +
+            "streaming JSON that duplicate finalText. Use only for diagnosis."
+        )
+    },
     outputSchema
   },
   grokResult

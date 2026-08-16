@@ -88,6 +88,24 @@ All notable user-visible and contract changes to `grok-plugin-codex`.
 
 ### Changed
 
+- **GPC-03a — tool echo no longer pollutes completeness, payload size, or write volume (contract change).**
+  84.6 % of the 40.9 MB of recorded Grok stdout was `tool_call_update` echo and 3.16 % was
+  `available_commands`, against 3.31 % of actual answer text; one capture held a base64 screenshot. Three
+  consequences are fixed:
+  - Completeness now keys on **`outputSummary.textTruncated`** — set only when the capture window evicted
+    characters that came from `text` events — instead of `outputTruncated`, which any echo overflow could
+    set. `outputTruncated` is still reported (with a warning saying only non-answer payload was dropped) but
+    no longer disqualifies a finished answer. **Callers must stop treating `outputTruncated === false` as an
+    acceptance criterion; use `resultComplete`.**
+  - Oversized payloads are elided as they are captured: any string over 2048 characters inside a
+    `tool_call*` event becomes `<elided N bytes>` and `available_commands` payloads are dropped. `text`
+    events are never rewritten. `GROK_PLUGIN_RAW_CAPTURE=1` keeps the vendor stream verbatim.
+  - Log flushing appends the delta instead of rewriting both whole files every 25 ms; a full rewrite happens
+    only when the bounded window evicts, and once at the end.
+- **GPC-03a — `grok_result` raw tails are opt-in (contract change).** `stdoutTail` and `stderrTail` were
+  30–40 k characters of per-token JSON duplicating `finalText` on every one of 656 recorded calls. They are
+  now returned only with `includeRawTail: true`.
+
 - **GPC-M1 — `background` default (contract change).** `background` had no default and an omitted flag meant
   *foreground*, so an MCP call could block for the full `timeoutMs` default of 600 000 ms; 65 % of observed
   execution calls never made that choice. `background` now defaults to **`true`** for `grok_run`,
