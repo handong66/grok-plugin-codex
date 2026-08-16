@@ -1,8 +1,23 @@
 import { join } from "node:path";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { classifyGrokErrorText, grokFailureMessage, signalPidTree } from "../plugins/grok-plugin-codex/src/grok-cli.js";
-import { buildRunArgs, grokCancel, grokRun } from "../plugins/grok-plugin-codex/src/tools.js";
+import { buildRunArgs, cancelOutcome, grokCancel, grokRun, grokStatus } from "../plugins/grok-plugin-codex/src/tools.js";
+import type { JobRecord } from "../plugins/grok-plugin-codex/src/types.js";
 import { fakeGrokScript, makeExecutable, tempDir } from "./helpers.js";
+
+function record(overrides: Partial<JobRecord>): JobRecord {
+  return {
+    id: "job_1700000000000_abcdef12",
+    kind: "run",
+    status: "running",
+    cwd: "/repo",
+    command: "grok",
+    args: [],
+    createdAt: "2026-08-16T00:00:00.000Z",
+    timeoutMs: 30_000,
+    ...overrides
+  };
+}
 
 type ToolResult = { content: Array<{ type: string; text: string }>; isError?: boolean };
 
@@ -105,7 +120,12 @@ describe("GK9(d) signalling a process tree that is no longer ours", () => {
 });
 
 describe("GK9(d) cancel outcomes", () => {
-  it("separates a real cancellation from a job that had already finished", async () => {
+  /**
+   * X15 / FINAL Review M11. This case used to derive a job id from a foreground envelope that does
+   * not carry one (`started.data.finalTextRef` is undefined on success), discard the `undefined`,
+   * and cancel an id that never existed — so the outcome it claimed to check was never asserted.
+   */
+  it("reports already_terminal for a job that had already finished", async () => {
     const workspace = await tempDir();
     const stateDir = await tempDir();
     const grokBin = await makeExecutable(join(workspace, "grok"), fakeGrokScript());
@@ -116,20 +136,69 @@ describe("GK9(d) cancel outcomes", () => {
         grokRun({
           cwd: workspace,
           _workspaceRoots: [workspace],
-          background: false,
           timeoutMs: 30_000,
           prompt: "done already"
         })
       )
     );
-    expect(started.ok).toBe(true);
-    const jobId = started.data.outputSummary ? started.data.finalTextRef : undefined;
-    void jobId;
+    const jobId = started.data.job.id as string;
+    const finished = await withEnv(env, async () => {
+      for (let attempt = 0; attempt < 200; attempt += 1) {
+        const parsed = envelope(await grokStatus({ jobId }));
+        if (!["queued", "running"].includes(parsed.data.job.status)) return parsed;
+        await new Promise((resolvePromise) => setTimeout(resolvePromise, 50));
+      }
+      throw new Error("Job never reached a terminal state.");
+    });
 
-    const unknown = envelope(await withEnv(env, () => grokCancel({ jobId: "job_neverexisted0000000000" })));
+    const cancelled = envelope(await withEnv(env, () => grokCancel({ jobId })));
+
+    expect(finished.data.job.status).toBe("succeeded");
+    expect(cancelled.ok).toBe(true);
+    expect(cancelled.data.outcome).toBe("already_terminal");
+    // The finished job keeps its own terminal state; cancelling it must not rewrite it.
+    expect(cancelled.data.job.status).toBe("succeeded");
+  }, 30_000);
+
+  it("reports job_not_found for an id that never existed", async () => {
+    const stateDir = await tempDir();
+
+    const unknown = envelope(
+      await withEnv({ GROK_PLUGIN_STATE_DIR: stateDir }, () =>
+        grokCancel({ jobId: "job_neverexisted0000000000" })
+      )
+    );
 
     expect(unknown.ok).toBe(false);
     expect(unknown.error.code).toBe("job_not_found");
+  });
+
+  /**
+   * X15: the outcome used to be decided by the record read *before* the cancel, so a worker that
+   * finished in the window between that read and `JobStore.cancel` — the common case for a job
+   * cancelled because it looked stuck seconds before it completed — was still reported as
+   * `cancel_requested`, and a caller obeying that verdict discarded a complete answer.
+   */
+  it("does not call a completed job cancelled when it finished during the cancel", () => {
+    const running = record({ status: "running" });
+    const cancelledAt = "2026-08-16T00:00:01.000Z";
+
+    expect(cancelOutcome(running, record({ status: "cancelled", cancelRequestedAt: cancelledAt }))).toBe(
+      "cancel_requested"
+    );
+    // The race: nothing was marked, because JobStore.cancel found the job already terminal.
+    expect(cancelOutcome(running, record({ status: "succeeded" }))).toBe("already_terminal");
+    expect(cancelOutcome(running, record({ status: "failed" }))).toBe("already_terminal");
+    // Already terminal before the call: never a cancellation, whatever the second read says.
+    expect(cancelOutcome(record({ status: "succeeded" }), record({ status: "succeeded" }))).toBe(
+      "already_terminal"
+    );
+    expect(
+      cancelOutcome(
+        record({ status: "cancelled", cancelRequestedAt: cancelledAt }),
+        record({ status: "cancelled", cancelRequestedAt: cancelledAt })
+      )
+    ).toBe("already_terminal");
   });
 
   it("reports cancel_requested for a live job", async () => {

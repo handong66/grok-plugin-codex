@@ -23,6 +23,7 @@ import { PLUGIN_VERSION } from "./version.js";
 import {
   GrokPluginError,
   type JobKind,
+  type JobRecord,
   type ToolEnvelope
 } from "./types.js";
 
@@ -1534,16 +1535,29 @@ export async function grokResult(args: {
   });
 }
 
+/**
+ * GK9(d): "cancelled a running job" and "the job had already finished" are different outcomes and
+ * used to be the same envelope. The distinction decides whether a result is still worth reading.
+ *
+ * X15: the verdict used to be read off the *pre-cancel* record alone, so a worker that reached a
+ * terminal state in the window between that read and the cancel — the common case for a job cancelled
+ * because it looked stuck seconds before it finished — was still reported as `cancel_requested`, and
+ * a caller that treats that as "no answer here" threw away a complete result. `JobStore.cancel`
+ * returns without marking anything when the job is already terminal, so the record it returns is the
+ * fact to read: only a record that really carries the cancellation counts as a cancellation.
+ */
+export function cancelOutcome(before: JobRecord, after: JobRecord): "cancel_requested" | "already_terminal" {
+  if (TERMINAL_JOB_STATUSES.has(before.status)) return "already_terminal";
+  return after.status === "cancelled" && after.cancelRequestedAt ? "cancel_requested" : "already_terminal";
+}
+
 export async function grokCancel(args: { jobId: string }) {
   return await guarded(async () => {
     const store = new JobStore();
-    // GK9(d): "cancelled a running job" and "the job had already finished" are different outcomes and
-    // used to be the same envelope. The distinction decides whether a result is still worth reading.
     const before = await store.read(args.jobId);
-    const alreadyTerminal = TERMINAL_JOB_STATUSES.has(before.status);
-    const job = alreadyTerminal ? before : await store.cancel(args.jobId);
+    const job = TERMINAL_JOB_STATUSES.has(before.status) ? before : await store.cancel(args.jobId);
     return success({
-      outcome: alreadyTerminal ? "already_terminal" : "cancel_requested",
+      outcome: cancelOutcome(before, job),
       job: toPublicJob(job)
     });
   });
