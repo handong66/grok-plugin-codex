@@ -120,6 +120,47 @@ describe("GK7 workspace_unavailable", () => {
   });
 });
 
+/**
+ * FINAL Review M7. GK7 lets a turn that carries no roots reuse the root set from an earlier turn,
+ * so the call is authorised against the remembered roots — but the state-directory containment check
+ * looked only at `cwd`. A private state directory sitting inside one of the *other* active roots
+ * therefore passed on exactly those turns, which is when the plugin has the least information.
+ */
+describe("M7 state containment uses the same roots that authorised the call", () => {
+  it("rejects a state directory inside a remembered root that is not the cwd", async () => {
+    const workspaceA = await tempDir();
+    const workspaceB = await tempDir();
+    const cleanState = await tempDir();
+    const grokBin = await makeExecutable(join(workspaceA, "grok"), fakeGrok());
+    configureWorkspaceRootsProvider(async () => []);
+
+    // Turn 1 carries both roots, so GK7 remembers them.
+    const remembered = envelope(
+      await withEnv({ GROK_BIN: grokBin, GROK_PLUGIN_STATE_DIR: cleanState }, () =>
+        grokRun({
+          cwd: workspaceA,
+          _workspaceRoots: [workspaceA, workspaceB],
+          background: false,
+          timeoutMs: 30_000,
+          prompt: "first"
+        })
+      )
+    );
+
+    // Turn 2 carries no roots at all: the boundary check falls back to the remembered pair, and the
+    // state directory now sits inside the root that is not this call's cwd.
+    const polluting = envelope(
+      await withEnv({ GROK_BIN: grokBin, GROK_PLUGIN_STATE_DIR: join(workspaceB, "state") }, () =>
+        grokRun({ cwd: workspaceA, background: false, timeoutMs: 30_000, prompt: "second" })
+      )
+    );
+
+    expect(remembered.ok).toBe(true);
+    expect(polluting.ok).toBe(false);
+    expect(polluting.error.code).toBe("state_dir_in_workspace");
+  }, 40_000);
+});
+
 describe("GK8 session_not_found", () => {
   it("falls back to the latest session once when the named one is gone", async () => {
     const workspace = await tempDir();

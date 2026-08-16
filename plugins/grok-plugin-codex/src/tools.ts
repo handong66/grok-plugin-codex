@@ -421,7 +421,13 @@ async function canonicalProspectivePath(path: string): Promise<string> {
 
 async function assertStateOutsideWorkspace(store: JobStore, cwd: string, requestRoots: string[] = []): Promise<void> {
   const stateDir = await canonicalProspectivePath(store.stateDir);
-  const workspaceRoots = [...new Set([...(await canonicalWorkspaceRoots(requestRoots)), cwd])];
+  // FINAL Review M7: the boundary check that admitted this `cwd` may itself have run on the roots
+  // remembered from an earlier turn (GK7). Checking the state directory against a *different*,
+  // smaller root set than the one that authorised the call leaves the containment rule one turn
+  // wide open: on a turn with no roots this saw only `cwd`, so a state directory sitting inside
+  // another active root passed.
+  const roots = await canonicalWorkspaceRoots(requestRoots, { allowRemembered: true });
+  const workspaceRoots = [...new Set([...roots, cwd])];
   if (workspaceRoots.some((root) => isWithin(root, stateDir) || isWithin(stateDir, root))) {
     throw new GrokPluginError(
       "state_dir_in_workspace",
