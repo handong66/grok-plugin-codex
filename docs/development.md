@@ -96,6 +96,12 @@ free-form field (`errorMessage`, `stackTail`, `teardownError`, `workerLogTail`) 
 `<state>`, the install directory `<plugin>`, the home directory `<home>`. Any new free-form diagnostic
 field must go through the same redactor, or docs/privacy.md stops being true.
 
+`outputSummary.filesInspected` is such a field: the paths in it are chosen by Grok, and the recorded
+delegates opened `~/.grok/skills/pua/SKILL.md`, so `summarizeGrokOutput` takes a `PathRedactor` and
+applies it as each path is collected. `JobStore.result()` and the worker pass their store's redactor;
+a direct parser caller gets the home-directory fallback (`defaultDiagnosticRedactor`). `skillsLoaded`
+needs no redaction because it stores the extracted skill name, not the path it came from.
+
 ## Local upgrade loop
 
 Codex caches local plugins by manifest version. During local iteration, update the manifest cachebuster with the `plugin-creator` helper when available, keep that single `+codex.<cachebuster>` suffix in the source manifest while the local marketplace points at the working repository, reinstall from the confirmed local marketplace, and start a new Codex task. The package and MCP server continue to advertise the base release version. Do not hand-edit Codex cache contents.

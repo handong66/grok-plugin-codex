@@ -118,6 +118,55 @@ describe("evidence contract (X2 / GK2)", () => {
     expect(summary.resultComplete).toBe(true);
   });
 
+  it("redacts the roots out of filesInspected, which holds paths Grok chose", () => {
+    const home = process.env.HOME ?? "/home/nobody";
+    const stream = [
+      JSON.stringify({ type: "tool_call", toolCallId: "t1", rawInput: { path: `${home}/.grok/skills/pua/SKILL.md` } }),
+      JSON.stringify({ type: "tool_call", toolCallId: "t2", rawInput: { path: "/repo/src/index.ts" } }),
+      JSON.stringify({ type: "text", data: "x".repeat(500) }),
+      JSON.stringify({ type: "end", stopReason: "end_turn" })
+    ].join("\n");
+
+    const summary = summarizeGrokOutput(record("review"), stream);
+
+    // 57 of 128 recorded runs opened a persona file under the home directory; those are not the
+    // caller's locations, and this array reaches every public envelope.
+    expect(summary.filesInspected).toContain("<home>/.grok/skills/pua/SKILL.md");
+    expect(summary.filesInspected.join(" ")).not.toContain(home);
+    // A path the caller chose — inside the reviewed workspace — is left alone.
+    expect(summary.filesInspected).toContain("/repo/src/index.ts");
+  });
+
+  it("redacts the private state directory out of a public grok_result", async () => {
+    const dir = await tempDir();
+    const stateDir = await tempDir();
+    const grokBin = await makeExecutable(
+      join(dir, "grok"),
+      `#!/bin/sh
+if [ "$1" = "--version" ]; then echo "grok fake 1.0.3"; exit 0; fi
+if [ "$1" = "--help" ]; then echo "--prompt-file streaming-json --permission-mode plan --no-subagents --disable-web-search"; exit 0; fi
+printf '%s\\n' '{"type":"tool_call","toolCallId":"t1","toolName":"read_file","rawInput":{"path":"${stateDir}/jobs/leaked.json"}}' '{"type":"text","data":"read the job record"}' '{"type":"end","stopReason":"end_turn"}'
+`
+    );
+
+    const started = envelope(
+      await withEnv({ GROK_BIN: grokBin, GROK_PLUGIN_STATE_DIR: stateDir }, () =>
+        grokRun({ cwd: dir, _workspaceRoots: [dir], prompt: "peek at state", timeoutMs: 20_000 })
+      )
+    );
+    const jobId = started.data.job.id as string;
+    const finished = await withEnv({ GROK_PLUGIN_STATE_DIR: stateDir }, async () => {
+      for (let attempt = 0; attempt < 100; attempt += 1) {
+        const parsed = envelope(await grokResult({ jobId }));
+        if (!["queued", "running"].includes(parsed.data?.job.status)) return parsed;
+        await new Promise((resolvePromise) => setTimeout(resolvePromise, 100));
+      }
+      throw new Error("Job never reached a terminal state.");
+    });
+
+    expect(finished.data.outputSummary.filesInspected).toEqual(["<state>/jobs/leaked.json"]);
+  }, 30_000);
+
   it("counts tool calls in a real recorded capture", async () => {
     const fixture = await readFile(
       fileURLToPath(new URL("./fixtures/grok-1.0.x/end-turn-success.jsonl", import.meta.url)),

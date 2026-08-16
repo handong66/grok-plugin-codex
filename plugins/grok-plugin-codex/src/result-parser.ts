@@ -6,6 +6,7 @@ import {
   grokFailureMessage,
   isRetryableGrokFailure
 } from "./grok-cli.js";
+import { defaultDiagnosticRedactor, type PathRedactor } from "./redact.js";
 
 /** Grok has shipped both `EndTurn` and `end_turn`; compare on a case/separator-free form. */
 export function normalizeStopReason(value: string | undefined): string {
@@ -95,10 +96,17 @@ function toolCallIdOf(event: Record<string, unknown>): string | undefined {
 
 const FILE_PATH_KEYS = new Set(["path", "file", "file_path", "filePath", "filename", "fileName", "uri"]);
 
-function collectInspectedFiles(value: unknown, into: Set<string>, depth = 0): void {
+/**
+ * The paths here are chosen by Grok, not by the caller: the recorded delegates opened
+ * `~/.grok/skills/pua/SKILL.md` and `~/.claude/skills/using-superpowers/SKILL.md`, so home-directory
+ * locations outside the workspace routinely land in this public array. Every free-form diagnostic
+ * field goes through the redactor before it leaves the process (docs/privacy.md), and redacting on
+ * insertion also keeps the de-duplication working on the value that is actually returned.
+ */
+function collectInspectedFiles(value: unknown, into: Set<string>, redact: PathRedactor, depth = 0): void {
   if (depth > 6 || into.size > 200) return;
   if (Array.isArray(value)) {
-    for (const entry of value) collectInspectedFiles(entry, into, depth + 1);
+    for (const entry of value) collectInspectedFiles(entry, into, redact, depth + 1);
     return;
   }
   const record = nestedRecord(value);
@@ -106,10 +114,10 @@ function collectInspectedFiles(value: unknown, into: Set<string>, depth = 0): vo
   for (const [key, entry] of Object.entries(record)) {
     if (FILE_PATH_KEYS.has(key)) {
       const path = stringValue(entry);
-      if (path && path.length <= 4_096) into.add(path);
+      if (path && path.length <= 4_096) into.add(redact(path));
       continue;
     }
-    collectInspectedFiles(entry, into, depth + 1);
+    collectInspectedFiles(entry, into, redact, depth + 1);
   }
 }
 
@@ -180,7 +188,9 @@ export function summarizeGrokOutput(
   record: JobRecord,
   stdout: string,
   stderr = "",
-  outputTruncated = record.outputTruncated ?? false
+  outputTruncated = record.outputTruncated ?? false,
+  /** The store passes its own redactor so `<state>` and `<plugin>` are covered too. */
+  redact: PathRedactor = defaultDiagnosticRedactor()
 ): JobOutputSummary {
   const eventCounts: Record<string, number> = {};
   const textChunks: string[] = [];
@@ -217,7 +227,7 @@ export function summarizeGrokOutput(
       toolEventCount += 1;
       const id = toolCallIdOf(event);
       if (id) toolCallIds.add(id);
-      collectInspectedFiles(event, filesInspected);
+      collectInspectedFiles(event, filesInspected, redact);
     }
     if (eventType === "thought") thoughtEventCount += 1;
     if (eventType === "text") {

@@ -51,6 +51,17 @@ export function redactDeviceCode(value: string): string {
 }
 
 /**
+ * X2: `outputSummary.filesInspected` is a public field holding paths **Grok** chose, not the caller —
+ * the recorded delegates opened `~/.grok/skills/pua/SKILL.md` and `~/.claude/skills/…/SKILL.md`, home
+ * locations outside the workspace — so it is a free-form diagnostic and goes through the redactor like
+ * the others. A summary built without a `JobStore` (direct parser callers) has no state or install
+ * directory to name, so the fallback covers the home directory only.
+ */
+export function defaultDiagnosticRedactor(env: NodeJS.ProcessEnv = process.env): PathRedactor {
+  return createPathRedactor([{ path: env.HOME ?? homedir(), label: "<home>" }]);
+}
+
+/**
  * The roots a job diagnostic can plausibly name: the private state directory, the directory the
  * plugin is installed in (stack frames), and the user's home directory (everything else).
  */

@@ -724,7 +724,11 @@ export class JobStore {
         record,
         summaryStdout,
         redactDeviceCode(summaryStderr),
-        record.outputTruncated
+        record.outputTruncated,
+        // `filesInspected` names paths Grok chose, including locations under the home directory that
+        // no caller asked about; it leaves this process through the same redactor as every other
+        // free-form diagnostic field.
+        this.redactDiagnostics
       )
     };
   }

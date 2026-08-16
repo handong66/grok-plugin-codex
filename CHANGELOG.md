@@ -67,7 +67,11 @@ All notable user-visible and contract changes to `grok-plugin-codex`.
   `substantive`. For `kind: review` and `kind: adversarial_review`, `toolCallCount === 0` makes
   `resultComplete` false with the warning `verdict produced with 0 tool calls — treat as opinion, not review`,
   and the foreground call returns the new **`no_evidence_review`** code. The answer itself is never destroyed:
-  `grok_result` still returns the complete text. Plain `grok_run` is unaffected.
+  `grok_result` still returns the complete text. Plain `grok_run` is unaffected. `filesInspected` holds paths
+  Grok chose rather than the caller — the recorded delegates opened `~/.grok/skills/pua/SKILL.md` — so it goes
+  through the same path redactor as the other free-form diagnostics: the state directory reads `<state>`, the
+  install directory `<plugin>`, the home directory `<home>`, while files inside the caller's workspace stay
+  verbatim.
 - **X2 — a cancelled stop reason is no longer stored as `succeeded`.** 24 of 64 recorded jobs ended with
   `stopReason: cancelled` and were persisted as `succeeded`; the worker now records them as `cancelled`.
 - **X2 — review output contract.** `grok_adversarial_review` no longer asks for "at most 5 findings", which

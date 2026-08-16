@@ -450,7 +450,8 @@ export async function runJobWorker(jobId: string, store = new JobStore()): Promi
         { ...latest, status: outcome.exitCode === 0 ? "succeeded" : "failed" },
         stdout,
         stderr,
-        outputTruncated
+        outputTruncated,
+        store.redactDiagnostics
       );
       if (parsed.streamError) {
         latest.status = "failed";
