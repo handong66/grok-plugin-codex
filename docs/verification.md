@@ -4,10 +4,8 @@ Offline gate, 0.3.0: verified 2026-08-16 — `npm run check` green on macOS 26.6
 Node v25.9.0. This records that the deterministic gate passed on one machine. It observed no Grok CLI
 and therefore says nothing about CLI compatibility.
 
-Live gate, 0.3.0: **not run**. `npm run smoke:live-grok` has not been executed for this release, so
-nothing in this file establishes that 0.3.0 works against any Grok CLI version. It is required before
-publishing (see below), and the line recording it must name the CLI version it ran against. **The
-branch may be merged in this state; it must not be published in it.**
+Live gate, 0.3.0: verified 2026-08-16 — `npm run smoke:live-grok` passed against
+Grok CLI 1.0.3 (1a29d5bc12d4) on darwin arm64 25.6.0, Node v25.9.0.
 
 Previous dated record: 0.2.1 was verified on 2026-07-11 against Grok CLI 1.0.3 on macOS.
 
@@ -67,10 +65,12 @@ npm run smoke:live-grok
 
 The live smoke uses an explicit workspace, disables web search and subagents, requests one exact sentinel, and verifies `data.finalText`. Set `GROK_SMOKE_MODEL` only when an explicit model must be tested; otherwise Grok's configured default is used.
 
-Status for 0.3.0: not run. The release is blocked on it — `GROK_PLUGIN_RELEASE=1 npm run
-validate:plugin` fails until the live record at the top of this file is replaced — and the smoke run
-prints the record to paste there. Nothing in the repository can substitute for it: every fixture is
-hand-written, and unit tests must never call the real API.
+Status for 0.3.0: run and recorded — 2026-08-16, Grok CLI 1.0.3 (1a29d5bc12d4), sentinel
+`GROK_PLUGIN_CODEX_OK` returned. `GROK_PLUGIN_RELEASE=1 npm run validate:plugin` reads the live
+record at the top of this file and fails while it is missing, undated, still says the gate was never
+executed, or does not name a `Grok CLI <x.y.z>`; the smoke run prints the record to paste there.
+Nothing in the repository can substitute for it: every fixture is hand-written, and unit tests must
+never call the real API.
 
 This is **required before publishing a release**, not optional. It is the only gate that observes the real Grok stream vocabulary: the 0.2.1 stop-reason regression (`EndTurn` vs `end_turn`) passed every offline gate for a month because no mandatory check ever saw a live `end` event. It stays out of `npm run check` and out of `npm test` on purpose — unit tests must never call the real API, and the account behind this plugin has repeatedly exhausted its free tier.
 
