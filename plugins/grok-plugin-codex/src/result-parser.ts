@@ -223,80 +223,167 @@ function streamErrorFrom(event: Record<string, unknown>): PluginErrorInfo | unde
   };
 }
 
+/**
+ * GPC-03b: the facts a single pass over the stream yields. Splitting them out from the derivation
+ * below lets the worker collect them **once, incrementally**, persist them next to the job, and let
+ * `JobStore.result()` answer from that ledger instead of re-parsing up to 4MB of raw stream on each
+ * of the 656 recorded `grok_result` calls. Both producers share `observeStreamLine`, so the ledger
+ * and the fallback re-parse cannot drift apart.
+ */
+export type StreamFacts = {
+  eventCounts: Record<string, number>;
+  /** Concatenated `text`-event payloads: the answer, and nothing else. */
+  finalText: string;
+  textChars: number;
+  grokSessionId?: string;
+  requestId?: string;
+  stopReason?: string;
+  sawEnd: boolean;
+  thoughtEventCount: number;
+  textEventCount: number;
+  toolCallCount: number;
+  toolCallIds: string[];
+  toolEventCount: number;
+  filesInspected: string[];
+  skillsLoaded: string[];
+  deniedToolCalls: { name: string; count: number }[];
+  lastToolName?: string;
+  turnsUsed?: number;
+  /** Wall-clock time of the last observed event; only the incremental producer can know it. */
+  lastEventAt?: string;
+  streamError?: PluginErrorInfo;
+};
+
+export type MutableStreamFacts = Omit<
+  StreamFacts,
+  "finalText" | "toolCallIds" | "filesInspected" | "skillsLoaded" | "deniedToolCalls" | "toolCallCount"
+> & {
+  textChunks: string[];
+  toolCallIds: Set<string>;
+  filesInspected: Set<string>;
+  skillsLoaded: Set<string>;
+  deniedToolCounts: Map<string, number>;
+};
+
+export function createStreamFacts(): MutableStreamFacts {
+  return {
+    eventCounts: {},
+    textChunks: [],
+    textChars: 0,
+    sawEnd: false,
+    thoughtEventCount: 0,
+    textEventCount: 0,
+    toolEventCount: 0,
+    toolCallIds: new Set(),
+    filesInspected: new Set(),
+    skillsLoaded: new Set(),
+    deniedToolCounts: new Map()
+  };
+}
+
+/** Returns the `text`-event payload of this line, so an incremental caller can append it to a ledger. */
+export function observeStreamLine(
+  line: string,
+  facts: MutableStreamFacts,
+  redactInspectedPath: PathRedactor
+): string | undefined {
+  if (!line.trim()) return undefined;
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(line);
+  } catch {
+    return undefined;
+  }
+  const event = nestedRecord(parsed);
+  if (!event) return undefined;
+
+  const eventType = stringValue(event.type) ?? "unknown";
+  facts.eventCounts[eventType] = (facts.eventCounts[eventType] ?? 0) + 1;
+  facts.streamError ??= streamErrorFrom(event);
+
+  if (eventType.startsWith("tool_call") || eventType === "tool_use") {
+    collectSkillLoads(line, facts.skillsLoaded);
+    facts.toolEventCount += 1;
+    const id = toolCallIdOf(event);
+    if (id) facts.toolCallIds.add(id);
+    collectInspectedFiles(event, facts.filesInspected, redactInspectedPath);
+    const toolName = toolNameOf(event);
+    if (toolName) facts.lastToolName = toolName;
+    const denied = DENIED_TOOL_PATTERN.exec(line);
+    if (denied) {
+      const name = denied[1] ?? toolName ?? "unknown";
+      facts.deniedToolCounts.set(name, (facts.deniedToolCounts.get(name) ?? 0) + 1);
+    }
+  }
+  if (eventType === "thought") facts.thoughtEventCount += 1;
+  if (eventType === "end") {
+    facts.sawEnd = true;
+    facts.grokSessionId = eventMetadata(event, "sessionId") ?? facts.grokSessionId;
+    facts.requestId = eventMetadata(event, "requestId") ?? facts.requestId;
+    facts.stopReason = eventMetadata(event, "stopReason") ?? facts.stopReason;
+    facts.turnsUsed = turnCountOf(event) ?? facts.turnsUsed;
+  }
+  if (eventType !== "text") return undefined;
+  const text = eventText(event);
+  if (text === undefined) return undefined;
+  facts.textEventCount += 1;
+  facts.textChunks.push(text);
+  facts.textChars += text.length;
+  return text;
+}
+
+export function freezeStreamFacts(facts: MutableStreamFacts): StreamFacts {
+  const { textChunks, toolCallIds, filesInspected, skillsLoaded, deniedToolCounts, ...rest } = facts;
+  return {
+    ...rest,
+    finalText: textChunks.join(""),
+    toolCallIds: [...toolCallIds],
+    // Unique ids are the exact count; an anonymous tool stream still proves the calls happened.
+    toolCallCount: toolCallIds.size || facts.toolEventCount,
+    filesInspected: [...filesInspected],
+    skillsLoaded: [...skillsLoaded],
+    deniedToolCalls: [...deniedToolCounts.entries()].map(([name, count]) => ({ name, count }))
+  };
+}
+
+export function scanGrokStream(stdout: string, redactInspectedPath: PathRedactor): StreamFacts {
+  const facts = createStreamFacts();
+  for (const line of stdout.split(/\r?\n/)) observeStreamLine(line, facts, redactInspectedPath);
+  return freezeStreamFacts(facts);
+}
+
 export function summarizeGrokOutput(
   record: JobRecord,
   stdout: string,
   stderr = "",
   outputTruncated = record.outputTruncated ?? false,
   /** The store passes its own redactor so `<state>` and `<plugin>` are covered too. */
-  redact: PathRedactor = defaultDiagnosticRedactor()
+  redact: PathRedactor = defaultDiagnosticRedactor(),
+  /** Pre-collected facts from the worker's ledger; when absent the raw stream is scanned. */
+  precomputed?: StreamFacts
 ): JobOutputSummary {
-  const eventCounts: Record<string, number> = {};
-  const textChunks: string[] = [];
-  let grokSessionId: string | undefined;
-  let requestId: string | undefined;
-  let stopReason: string | undefined;
-  let sawEnd = false;
-  let thoughtEventCount = 0;
-  let textEventCount = 0;
-  let streamError: PluginErrorInfo | undefined;
-  const skillsLoaded = new Set<string>();
-  const toolCallIds = new Set<string>();
-  const filesInspected = new Set<string>();
   /** Files inside the workspace this job ran in are the caller's own location and stay verbatim. */
   const redactInspectedPath = exemptWorkspacePaths(redact, record.cwd);
-  let toolEventCount = 0;
-  let turnsUsed: number | undefined;
-  const deniedToolCounts = new Map<string, number>();
-  let lastToolName: string | undefined;
+  const facts = precomputed ?? scanGrokStream(stdout, redactInspectedPath);
+  const {
+    eventCounts,
+    grokSessionId: endSessionId,
+    requestId,
+    stopReason,
+    sawEnd,
+    thoughtEventCount,
+    textEventCount,
+    streamError,
+    skillsLoaded,
+    filesInspected,
+    toolCallCount,
+    deniedToolCalls,
+    lastToolName,
+    turnsUsed
+  } = facts;
+  let grokSessionId = endSessionId;
 
-  for (const line of stdout.split(/\r?\n/)) {
-    if (!line.trim()) continue;
-    let parsed: unknown;
-    try {
-      parsed = JSON.parse(line);
-    } catch {
-      continue;
-    }
-    const event = nestedRecord(parsed);
-    if (!event) continue;
-
-    const eventType = stringValue(event.type) ?? "unknown";
-    eventCounts[eventType] = (eventCounts[eventType] ?? 0) + 1;
-    streamError ??= streamErrorFrom(event);
-
-    if (eventType.startsWith("tool_call") || eventType === "tool_use") {
-      collectSkillLoads(line, skillsLoaded);
-      toolEventCount += 1;
-      const id = toolCallIdOf(event);
-      if (id) toolCallIds.add(id);
-      collectInspectedFiles(event, filesInspected, redactInspectedPath);
-      const toolName = toolNameOf(event);
-      if (toolName) lastToolName = toolName;
-      const denied = DENIED_TOOL_PATTERN.exec(line);
-      if (denied) {
-        const name = denied[1] ?? toolName ?? "unknown";
-        deniedToolCounts.set(name, (deniedToolCounts.get(name) ?? 0) + 1);
-      }
-    }
-    if (eventType === "thought") thoughtEventCount += 1;
-    if (eventType === "text") {
-      const text = eventText(event);
-      if (text !== undefined) {
-        textEventCount += 1;
-        textChunks.push(text);
-      }
-    }
-    if (eventType === "end") {
-      sawEnd = true;
-      grokSessionId = eventMetadata(event, "sessionId") ?? grokSessionId;
-      requestId = eventMetadata(event, "requestId") ?? requestId;
-      stopReason = eventMetadata(event, "stopReason") ?? stopReason;
-      turnsUsed = turnCountOf(event) ?? turnsUsed;
-    }
-  }
-
-  const finalText = textChunks.join("");
+  const finalText = facts.finalText;
   const warnings: string[] = [];
   // GPC-03a: `outputTruncated` means the shared capture window overflowed, and 84.6% of that window
   // is tool echo. Only `textTruncated` — set by the worker when evicted characters actually came
@@ -325,11 +412,10 @@ export function summarizeGrokOutput(
   else if (record.status === "queued") state = "queued_partial";
   else state = "running_partial";
 
-  const toolCallCount = toolCallIds.size || toolEventCount;
   const evidenceLevel: JobOutputSummary["evidenceLevel"] =
     toolCallCount === 0
       ? "none"
-      : filesInspected.size === 0 || finalText.trim().length < THIN_EVIDENCE_TEXT_CHARS
+      : filesInspected.length === 0 || finalText.trim().length < THIN_EVIDENCE_TEXT_CHARS
         ? "thin"
         : "substantive";
   // X2: a review verdict from a reviewer that opened nothing is an opinion. 30 of 64 succeeded jobs
@@ -342,7 +428,6 @@ export function summarizeGrokOutput(
     warnings.push("verdict produced with 0 tool calls — treat as opinion, not review");
   }
 
-  const deniedToolCalls = [...deniedToolCounts.entries()].map(([name, count]) => ({ name, count }));
   const deniedShell = deniedToolCalls.some((entry) => SHELL_TOOL_PATTERN.test(entry.name));
   // GK5: a `cancelled` end whose last tool activity was a shell command in an enforced read-only
   // session was reported as "narrow the target", which is unrelated to the actual cause.
@@ -391,9 +476,9 @@ export function summarizeGrokOutput(
         .join(", ")}; any conclusion that depended on that output rests on evidence Grok never got`
     );
   }
-  if (skillsLoaded.size) {
+  if (skillsLoaded.length) {
     warnings.push(
-      `Grok loaded ${skillsLoaded.size} interactive skill file(s) (${[...skillsLoaded].join(", ")}) during a ` +
+      `Grok loaded ${skillsLoaded.length} interactive skill file(s) (${skillsLoaded.join(", ")}) during a ` +
         "headless delegation; that spends turn and time budget on repository bootstrap instructions."
     );
   }
@@ -404,9 +489,9 @@ export function summarizeGrokOutput(
     finalText: finalText || undefined,
     outputTruncated,
     textTruncated,
-    skillsLoaded: [...skillsLoaded],
+    skillsLoaded,
     toolCallCount,
-    filesInspected: [...filesInspected],
+    filesInspected,
     deniedToolCalls,
     shellApprovalBlocked,
     turnsUsed,

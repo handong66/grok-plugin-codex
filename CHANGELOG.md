@@ -72,6 +72,17 @@ All notable user-visible and contract changes to `grok-plugin-codex`.
 
 ### Added
 
+- **GPC-03b — final-text ledger and a result path that does not re-parse.** `JobStore.result()` read
+  up to 4 MB of raw stream and re-parsed up to 1 M characters on every call, 656 times in the recorded
+  window, to rebuild the 3.31 % of the stream that is answer text. The worker now records the answer
+  into `<id>.final.txt` (`0600`, append-only) and the stream facts into `<id>.summary.json` — event
+  counts, session/request id, stop reason, `sawEnd`, `textChars`, `lastEventAt`, tool-call count,
+  `filesInspected`, `skillsLoaded`, `deniedToolCalls`, `turnsUsed` — as the stream arrives, using the
+  same per-line observer as the fallback parse, so ledger and re-parse cannot drift. `result()` reads
+  the ledger; a record written before 0.3.0, or an answer past the 4 M-character ledger ceiling, still
+  falls back to the full re-parse. Both new artifacts are in the strict pre-marker layout allowlist and
+  in `cleanupExpiredJobs`.
+
 - **GK1 — device-authorization hang.** When the CLI's device authorization has expired it prints a sign-in
   URL to stderr and waits for a browser that a headless job can never open, while `grok_status` still said
   `running`; three recorded jobs sat there, one for the full 600 000 ms, during an unattended overnight run.

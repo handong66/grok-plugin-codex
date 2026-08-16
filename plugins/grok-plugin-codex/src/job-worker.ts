@@ -14,13 +14,23 @@ import {
   signalPidTree,
   signalProcessTree
 } from "./grok-cli.js";
-import { JobStore } from "./job-store.js";
-import type { PathRedactor } from "./redact.js";
-import { errorEventText, summarizeGrokOutput } from "./result-parser.js";
+import { JobStore, STREAM_SUMMARY_VERSION } from "./job-store.js";
+import { exemptWorkspacePaths, type PathRedactor } from "./redact.js";
+import {
+  createStreamFacts,
+  errorEventText,
+  freezeStreamFacts,
+  observeStreamLine,
+  summarizeGrokOutput,
+  type MutableStreamFacts,
+  type StreamFacts
+} from "./result-parser.js";
 import { StreamCapture, type CaptureWrite } from "./stream-capture.js";
 import type { JobRecord } from "./types.js";
 
 const MAX_CAPTURE_CHARS = 1_000_000;
+/** The answer ledger is append-only, so it carries its own ceiling; past it, result() re-parses. */
+const MAX_FINAL_TEXT_LEDGER_CHARS = 4_000_000;
 const MAX_ERROR_MESSAGE_CHARS = 500;
 const MAX_STACK_TAIL_CHARS = 1_000;
 /**
@@ -62,6 +72,73 @@ function describeFailure(
     stackTail: stack ? options.redact(stack.slice(-MAX_STACK_TAIL_CHARS)) : undefined,
     ...(options.teardownError ? { teardownError: options.teardownError } : {})
   };
+}
+
+/**
+ * GPC-03b: an append-only account of the answer, kept as the stream arrives.
+ *
+ * The raw log is a bounded *window*, so the only way to answer `grok_result` from it is to re-parse
+ * up to 4MB and rebuild the 3.31% of it that is answer text — 656 times in the recorded window, and
+ * once per foreground poll before GPC-09. This records the same facts once, incrementally, using the
+ * very same `observeStreamLine` the fallback re-parse uses, so the two cannot drift.
+ */
+class StreamLedger {
+  private readonly facts: MutableStreamFacts = createStreamFacts();
+  private readonly redactInspectedPath: PathRedactor;
+  private pendingLine = "";
+  private pendingText = "";
+  private writtenTextChars = 0;
+  /** The ledger is unbounded on disk, unlike the window, so it needs its own ceiling. */
+  ledgerTruncated = false;
+
+  constructor(redact: PathRedactor, cwd: string) {
+    this.redactInspectedPath = exemptWorkspacePaths(redact, cwd);
+  }
+
+  append(chunk: string): void {
+    this.pendingLine += chunk;
+    const parts = this.pendingLine.split("\n");
+    this.pendingLine = parts.pop() ?? "";
+    for (const line of parts) this.observe(line);
+  }
+
+  finish(): void {
+    if (!this.pendingLine) return;
+    const pending = this.pendingLine;
+    this.pendingLine = "";
+    this.observe(pending);
+  }
+
+  private observe(line: string): void {
+    if (!line.trim()) return;
+    const text = observeStreamLine(line, this.facts, this.redactInspectedPath);
+    this.facts.lastEventAt = new Date().toISOString();
+    if (text === undefined) return;
+    if (this.writtenTextChars + this.pendingText.length + text.length > MAX_FINAL_TEXT_LEDGER_CHARS) {
+      this.ledgerTruncated = true;
+      return;
+    }
+    this.pendingText += text;
+  }
+
+  takeText(): string {
+    const text = this.pendingText;
+    this.pendingText = "";
+    this.writtenTextChars += text.length;
+    return text;
+  }
+
+  snapshot(): StreamFacts {
+    return freezeStreamFacts(this.facts);
+  }
+
+  serialize(): string {
+    return `${JSON.stringify(
+      { version: STREAM_SUMMARY_VERSION, ledgerTruncated: this.ledgerTruncated, ...this.snapshot(), finalText: undefined },
+      null,
+      2
+    )}\n`;
+  }
 }
 
 function newCapture(lineOriented: boolean): StreamCapture {
@@ -203,6 +280,7 @@ export async function runJobWorker(jobId: string, store = new JobStore()): Promi
   await rm(inputPath, { force: true });
 
   let child: ChildProcess | null = null;
+  const ledger = new StreamLedger(store.redactDiagnostics, record.cwd);
   const stdoutCapture = newCapture(true);
   const stderrCapture = newCapture(false);
   let promptDeliveryError: Error | undefined;
@@ -232,11 +310,18 @@ export async function runJobWorker(jobId: string, store = new JobStore()): Promi
       throw error;
     }
   };
+  const flushLedger = async (): Promise<void> => {
+    const text = ledger.takeText();
+    if (text) await appendFile(store.finalTextPath(jobId), text, { mode: 0o600 });
+    await writeFile(store.summaryPath(jobId), ledger.serialize(), { mode: 0o600 });
+    await chmod(store.summaryPath(jobId), 0o600);
+  };
   const flushLogs = () => {
     flushChain = flushChain.catch(() => undefined).then(async () => {
       await Promise.all([
         flushCapture(stdoutCapture, store.stdoutPath(jobId)),
-        flushCapture(stderrCapture, store.stderrPath(jobId))
+        flushCapture(stderrCapture, store.stderrPath(jobId)),
+        flushLedger()
       ]);
     });
     void flushChain.catch(() => undefined);
@@ -290,7 +375,12 @@ export async function runJobWorker(jobId: string, store = new JobStore()): Promi
     await store.write(record);
     record = await store.read(jobId);
     if (["succeeded", "failed", "cancelled"].includes(record.status)) return;
-    await Promise.all([writeLog(store.stdoutPath(jobId), ""), writeLog(store.stderrPath(jobId), "")]);
+    await Promise.all([
+      writeLog(store.stdoutPath(jobId), ""),
+      writeLog(store.stderrPath(jobId), ""),
+      writeLog(store.finalTextPath(jobId), ""),
+      writeLog(store.summaryPath(jobId), ledger.serialize())
+    ]);
 
     if (!record.processToken) throw new Error("Missing Grok process ownership token.");
     child = spawn(process.execPath, [store.workerPath, "--launch-grok", jobId, record.processToken], {
@@ -333,6 +423,7 @@ export async function runJobWorker(jobId: string, store = new JobStore()): Promi
     });
     child.stdout?.on("data", (chunk: string) => {
       stdoutCapture.append(chunk);
+      ledger.append(chunk);
       scheduleFlush();
     });
     const runStartedAt = Date.now();
@@ -383,6 +474,7 @@ export async function runJobWorker(jobId: string, store = new JobStore()): Promi
       await Promise.all([promptDelivery, streamsClosedPromise]);
       stdoutCapture.finish();
       stderrCapture.finish();
+      ledger.finish();
       await flushLogs();
     } catch (error) {
       teardownError = store.redactDiagnostics(
@@ -454,7 +546,8 @@ export async function runJobWorker(jobId: string, store = new JobStore()): Promi
         stdout,
         stderr,
         outputTruncated,
-        store.redactDiagnostics
+        store.redactDiagnostics,
+        ledger.ledgerTruncated ? undefined : ledger.snapshot()
       );
       if (parsed.streamError) {
         latest.status = "failed";

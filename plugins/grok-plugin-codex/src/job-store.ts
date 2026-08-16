@@ -8,7 +8,7 @@ import { fileURLToPath } from "node:url";
 import { promisify } from "node:util";
 import { buildWorkerEnv, discoverGrok, signalPidTree } from "./grok-cli.js";
 import { jobDiagnosticRedactor, redactDeviceCode, type PathRedactor } from "./redact.js";
-import { summarizeGrokOutput } from "./result-parser.js";
+import { summarizeGrokOutput, type StreamFacts } from "./result-parser.js";
 import {
   GrokPluginError,
   type JobKind,
@@ -39,6 +39,8 @@ const TERMINAL_STATUSES = new Set<JobRecord["status"]>(["succeeded", "failed", "
 const JOB_ID_PATTERN = /^job_[A-Za-z0-9_-]{16,128}$/;
 const PROMPT_SOURCE_ARGS = new Set(["-p", "--single", "--prompt-file", "--prompt-json"]);
 const STATE_MARKER_CONTENT = "grok-plugin-codex-state-v2\n";
+/** Bump when the persisted stream-summary shape changes; an older file is ignored, never guessed at. */
+export const STREAM_SUMMARY_VERSION = 1;
 /** The kinds this plugin has always started with `--permission-mode plan --no-subagents`. */
 const READ_ONLY_KINDS = new Set<JobKind>(["review", "adversarial_review", "rescue"]);
 const execFileAsync = promisify(execFile);
@@ -149,7 +151,7 @@ async function isRecognizedPreMarkerStateDir(stateDir: string, stateMode: number
 
   for (const entry of jobEntries) {
     const match = entry.name.match(
-      /^(job_[A-Za-z0-9_-]{16,128})(?:\.json|\.stdout\.log|\.stderr\.log|\.worker\.log|\.heartbeat|\.cancel|\.input|\.lock)$/
+      /^(job_[A-Za-z0-9_-]{16,128})(?:\.json|\.stdout\.log|\.stderr\.log|\.worker\.log|\.final\.txt|\.summary\.json|\.heartbeat|\.cancel|\.input|\.lock)$/
     );
     if (!match?.[1] || !validJobIds.has(match[1])) return false;
     const metadata = await lstat(join(jobsDir, entry.name)).catch(() => null);
@@ -236,6 +238,21 @@ export class JobStore {
   heartbeatPath(jobId: string): string {
     assertJobId(jobId);
     return join(this.jobsDir(), `${jobId}.heartbeat`);
+  }
+
+  /**
+   * GPC-03b: the answer text as an append-only ledger, so `result()` does not have to re-parse the
+   * raw stream (up to 4MB, 656 recorded calls) to find the 3.31% of it that is the answer.
+   */
+  finalTextPath(jobId: string): string {
+    assertJobId(jobId);
+    return join(this.jobsDir(), `${jobId}.final.txt`);
+  }
+
+  /** Stream facts collected incrementally by the worker; also the cheap progress source for status. */
+  summaryPath(jobId: string): string {
+    assertJobId(jobId);
+    return join(this.jobsDir(), `${jobId}.summary.json`);
   }
 
   /** Private capture of the worker process's own stderr; without it a hard crash is unreadable. */
@@ -703,16 +720,60 @@ export class JobStore {
     return await this.read(jobId);
   }
 
+  /**
+   * GPC-03b: the worker's incremental ledger, when it exists and is intact. A record written before
+   * 0.3.0 — or one whose answer outgrew the ledger cap — returns `undefined`, and the caller falls
+   * back to the full re-parse that was the only path in 0.2.x.
+   */
+  async readStreamFacts(jobId: string): Promise<StreamFacts | undefined> {
+    const raw = await readFile(this.summaryPath(jobId), "utf8").catch(() => null);
+    if (!raw?.trim()) return undefined;
+    let parsed: unknown;
+    try {
+      parsed = JSON.parse(raw);
+    } catch {
+      return undefined;
+    }
+    if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) return undefined;
+    const summary = parsed as Partial<StreamFacts> & { version?: number; ledgerTruncated?: boolean };
+    if (summary.version !== STREAM_SUMMARY_VERSION || summary.ledgerTruncated) return undefined;
+    if (!summary.eventCounts || typeof summary.eventCounts !== "object") return undefined;
+    const finalText = await readTail(this.finalTextPath(jobId), SUMMARY_READ_CHARS);
+    return {
+      eventCounts: summary.eventCounts,
+      finalText,
+      textChars: summary.textChars ?? finalText.length,
+      grokSessionId: summary.grokSessionId,
+      requestId: summary.requestId,
+      stopReason: summary.stopReason,
+      sawEnd: Boolean(summary.sawEnd),
+      thoughtEventCount: summary.thoughtEventCount ?? 0,
+      textEventCount: summary.textEventCount ?? 0,
+      toolCallCount: summary.toolCallCount ?? 0,
+      toolCallIds: summary.toolCallIds ?? [],
+      toolEventCount: summary.toolEventCount ?? 0,
+      filesInspected: summary.filesInspected ?? [],
+      skillsLoaded: summary.skillsLoaded ?? [],
+      deniedToolCalls: summary.deniedToolCalls ?? [],
+      lastToolName: summary.lastToolName,
+      turnsUsed: summary.turnsUsed,
+      lastEventAt: summary.lastEventAt,
+      streamError: summary.streamError
+    };
+  }
+
   async result(
     jobId: string,
     maxChars = 20_000
   ): Promise<{ record: JobRecord; stdout: string; stderr: string; outputSummary: JobOutputSummary }> {
     const record = await this.status(jobId);
     const boundedMaxChars = Math.min(Math.max(maxChars, 1), MAX_RESULT_CHARS);
+    const facts = await this.readStreamFacts(jobId);
     const [stdout, stderr, summaryStdout, summaryStderr] = await Promise.all([
       readTail(this.stdoutPath(jobId), boundedMaxChars),
       readTail(this.stderrPath(jobId), boundedMaxChars),
-      readTail(this.stdoutPath(jobId), SUMMARY_READ_CHARS),
+      // The 1MB re-read exists only for records without a ledger; with one, nothing needs it.
+      facts ? Promise.resolve("") : readTail(this.stdoutPath(jobId), SUMMARY_READ_CHARS),
       readTail(this.stderrPath(jobId), SUMMARY_READ_CHARS)
     ]);
     // The one-time OAuth device code never leaves the private log; the sign-in URL around it does.
@@ -728,7 +789,8 @@ export class JobStore {
         // `filesInspected` names paths Grok chose, including locations under the home directory that
         // no caller asked about; it leaves this process through the same redactor as every other
         // free-form diagnostic field.
-        this.redactDiagnostics
+        this.redactDiagnostics,
+        facts
       )
     };
   }
@@ -749,6 +811,8 @@ export class JobStore {
         rm(this.stdoutPath(jobId), { force: true }),
         rm(this.stderrPath(jobId), { force: true }),
         rm(this.workerLogPath(jobId), { force: true }),
+        rm(this.finalTextPath(jobId), { force: true }),
+        rm(this.summaryPath(jobId), { force: true }),
         rm(this.inputPath(jobId), { force: true }),
         rm(this.heartbeatPath(jobId), { force: true }),
         rm(this.cancelPath(jobId), { force: true }),
