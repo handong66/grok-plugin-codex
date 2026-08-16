@@ -92,7 +92,7 @@ An explicit state directory must be disjoint from every active workspace root: n
 
 Directories use `0700`; records, logs, prompt staging files, cancel markers, heartbeats, and owner-token cross-process locks use `0600`. Record writes are atomic and terminal status is monotonic. Cancellation is linearized by a marker consumed by the owning worker. Each process group is led by a private launcher whose command identity includes the job ID and random job token; stale-worker reconciliation terminates a persisted group only when all three match, and the launcher removes residual descendants before exiting.
 
-Start with `background: true`, save `data.job.id`, then call job tools with `jobId`. Only this combination is final:
+Dispatch tools (`grok_run`, `grok_review`, `grok_adversarial_review`, `grok_rescue`) default to `background: true`; `grok_continue` defaults to foreground. Save `data.job.id`, then call job tools with `jobId`. A foreground call (`background: false`) blocks for at most `timeoutMs` plus a 10 s grace and then returns `foreground_wait_timeout` with that job id. Only this combination is final:
 
 ```text
 data.resultComplete === true

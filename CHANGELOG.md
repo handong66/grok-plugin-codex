@@ -53,6 +53,14 @@ All notable user-visible and contract changes to `grok-plugin-codex`.
 
 ### Changed
 
+- **GPC-M1 — `background` default (contract change).** `background` had no default and an omitted flag meant
+  *foreground*, so an MCP call could block for the full `timeoutMs` default of 600 000 ms; 65 % of observed
+  execution calls never made that choice. `background` now defaults to **`true`** for `grok_run`,
+  `grok_review`, `grok_adversarial_review`, and `grok_rescue`, and to **`false`** for the short `grok_continue`.
+  Callers that relied on the implicit foreground behaviour must pass `background: false` explicitly. The
+  blocking semantics and the 600 000 ms default are now stated in the parameter's own `.describe()`, and a
+  foreground call with `timeoutMs > 120000` returns a warning naming the block.
+
 - **GPC-09 — foreground wait loop.** A blocking `grok_run` / `grok_review` / `grok_adversarial_review` /
   `grok_rescue` / `grok_continue` call polled the expensive result path every 50 ms; each tick re-read up to
   4 MB of logs and re-parsed up to 1 M characters of stream inside the shared MCP server process (about 2,400

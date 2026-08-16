@@ -49,6 +49,22 @@ const FOREGROUND_POLL_START_MS = 100;
 const FOREGROUND_POLL_MAX_MS = 2_000;
 const FOREGROUND_POLL_GRACE_MS = 10_000;
 
+/**
+ * GPC-M1: `background` had no default, so an omitted flag meant "block the MCP client for up to
+ * DEFAULT_RUN_TIMEOUT_MS". 65% of observed execution calls omitted it, which is the mechanism behind
+ * "the dispatched task never came back". Dispatch kinds now default to background; only `continue`
+ * — the short finish-the-answer call — stays in the foreground.
+ */
+const BACKGROUND_DEFAULT_BY_KIND: Record<JobKind, boolean> = {
+  run: true,
+  review: true,
+  adversarial_review: true,
+  rescue: true,
+  continue: false
+};
+/** Above this budget a blocking call is long enough to look like a hang to the caller. */
+const FOREGROUND_WARN_TIMEOUT_MS = 120_000;
+
 function sleep(ms: number): Promise<void> {
   return new Promise((resolvePromise) => setTimeout(resolvePromise, ms));
 }
@@ -333,6 +349,13 @@ async function runOrStartJob(params: CommonArgs & {
         ? buildContinueArgs({ ...params, cwd, capabilities })
         : buildRunArgs({ ...params, cwd, capabilities, readOnly });
     const effectiveTimeoutMs = params.timeoutMs ?? DEFAULT_RUN_TIMEOUT_MS;
+    const background = params.background ?? BACKGROUND_DEFAULT_BY_KIND[params.kind];
+    if (!background && effectiveTimeoutMs > FOREGROUND_WARN_TIMEOUT_MS) {
+      built.warnings.push(
+        `background:false blocks the MCP client for up to timeoutMs=${effectiveTimeoutMs}ms. ` +
+          "Prefer background:true plus grok_status/grok_result for budgets over 120000ms."
+      );
+    }
     const job = await store.startGrokJob({
       kind: params.kind,
       cwd,
@@ -341,7 +364,7 @@ async function runOrStartJob(params: CommonArgs & {
       timeoutMs: effectiveTimeoutMs,
       grokSessionId: params.sessionId
     });
-    if (params.background) {
+    if (background) {
       return success({ background: true, job: toPublicJob(job) }, built.warnings);
     }
 

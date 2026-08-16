@@ -34,7 +34,7 @@ Input-schema failures are SDK-generated tool errors (`isError: true`) without th
 
 Background state lives under `$GROK_PLUGIN_STATE_DIR`, otherwise `$XDG_STATE_HOME/grok-plugin-codex`, otherwise `~/.local/state/grok-plugin-codex`. An override that overlaps any active workspace root in either direction is rejected. Existing nonempty directories require the ownership marker or the strict private pre-marker job layout. Directories use `0700`; records, logs, cancel markers, heartbeats, cross-process locks, and brief prompt staging files use `0600`. The plugin writes no state into the user workspace and does not `chmod` unrelated shared directories.
 
-Start a run with `background: true`, save `data.job.id`, then call `grok_status`, `grok_result`, or `grok_cancel` with `jobId` only. A usable final answer requires both:
+`background` defaults to `true` for `grok_run`, `grok_review`, `grok_adversarial_review`, and `grok_rescue`, and to `false` for the short `grok_continue`. Save `data.job.id`, then call `grok_status`, `grok_result`, or `grok_cancel` with `jobId` only. Pass `background: false` to block this MCP call until the job is terminal; that blocks for up to `timeoutMs` (default `600000`) plus a 10 s grace, after which the plugin returns `foreground_wait_timeout` with the job id instead of blocking further. A usable final answer requires both:
 
 ```text
 data.resultComplete === true

@@ -74,11 +74,20 @@ const cwdOptional = z.string().trim().min(1).max(4_096).optional();
 const timeoutSchema = z.number().int().positive().max(86_400_000).optional();
 const jobIdSchema = z.string().min(20).max(132).regex(/^job_[A-Za-z0-9_-]+$/);
 
+const backgroundSchema = z
+  .boolean()
+  .optional()
+  .describe(
+    "Default true for grok_run/grok_review/grok_adversarial_review/grok_rescue and false for grok_continue. " +
+      "true returns data.job.id immediately; poll grok_status, then call grok_result once. " +
+      "false blocks this MCP call until the job is terminal, for up to timeoutMs (default 600000ms) plus a 10s grace."
+  );
+
 const executionShape = {
   cwd: cwdRequired,
   model: z.string().trim().min(1).max(512).optional(),
   timeoutMs: timeoutSchema,
-  background: z.boolean().optional(),
+  background: backgroundSchema,
   disableWebSearch: z.boolean().optional(),
   maxTurns: z.number().int().positive().max(10_000).optional(),
   reasoningEffort: z.string().trim().min(1).max(128).optional(),

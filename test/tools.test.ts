@@ -131,7 +131,7 @@ printf '%s\n' '{"type":"text","data":"I will review the diff."}' '{"type":"end",
       );
 
       const result = await withEnv({ GROK_BIN: grokBin, GROK_PLUGIN_STATE_DIR: stateDir }, () =>
-        grokRun({ cwd: dir, ...roots(dir), prompt: "review" })
+        grokRun({ cwd: dir, ...roots(dir), background: false, prompt: "review" })
       );
       const parsed = envelope(result);
 
@@ -155,7 +155,8 @@ printf '%s\n' '{"type":"text","data":"I will review the diff."}' '{"type":"end",
       const grokBin = await makeExecutable(join(dir, "grok"), fakeGrokScript({ stopReason }));
 
       const result = await withEnv({ GROK_BIN: grokBin, GROK_PLUGIN_STATE_DIR: stateDir }, () =>
-        grokRun({ cwd: dir, ...roots(dir), prompt: "review" })
+        // An explicit short budget keeps this case free of the long-foreground-budget warning.
+        grokRun({ cwd: dir, ...roots(dir), background: false, timeoutMs: 30_000, prompt: "review" })
       );
       const parsed = envelope(result);
 
@@ -174,7 +175,7 @@ printf '%s\n' '{"type":"text","data":"I will review the diff."}' '{"type":"end",
     const grokBin = await makeExecutable(join(dir, "grok"), fakeGrokScript({ stopReason: "conversation_over" }));
 
     const result = await withEnv({ GROK_BIN: grokBin, GROK_PLUGIN_STATE_DIR: stateDir }, () =>
-      grokRun({ cwd: dir, ...roots(dir), prompt: "review" })
+      grokRun({ cwd: dir, ...roots(dir), background: false, prompt: "review" })
     );
     const parsed = envelope(result);
 
@@ -202,7 +203,7 @@ exit 1
     );
 
     const result = await withEnv({ GROK_BIN: grokBin, GROK_PLUGIN_STATE_DIR: stateDir }, () =>
-      grokRun({ cwd: dir, ...roots(dir), prompt: "review" })
+      grokRun({ cwd: dir, ...roots(dir), background: false, prompt: "review" })
     );
     const parsed = envelope(result);
 
@@ -358,6 +359,7 @@ printf '%s\n' '{"type":"text","data":"OK"}' '{"type":"end","stopReason":"end_tur
       grokRun({
         cwd: dir,
         ...roots(dir),
+        background: false,
         model: "grok-build",
         prompt: "review this diff",
         disableWebSearch: true,
@@ -399,7 +401,7 @@ printf '%s\n' '{"type":"end","stopReason":"end_turn","sessionId":"s1"}'
         GROK_PLUGIN_STATE_DIR: stateDir,
         GROK_PLUGIN_CODEX_SECRET_TEST: "should-not-leak"
       },
-      () => grokRun({ cwd: dir, ...roots(dir), prompt: "env check" })
+      () => grokRun({ cwd: dir, ...roots(dir), background: false, prompt: "env check" })
     );
     const parsed = envelope(result);
 
@@ -421,7 +423,7 @@ exit 1
     );
 
     const result = await withEnv({ GROK_BIN: grokBin, GROK_PLUGIN_STATE_DIR: stateDir }, () =>
-      grokRun({ cwd: dir, ...roots(dir), prompt: "quota probe" })
+      grokRun({ cwd: dir, ...roots(dir), background: false, prompt: "quota probe" })
     );
     const parsed = envelope(result);
 
@@ -447,7 +449,7 @@ console.log(JSON.stringify({ type: "end", sessionId: "s1" }));
     );
 
     const result = await withEnv({ GROK_BIN: grokBin, GROK_PLUGIN_STATE_DIR: stateDir }, () =>
-      grokRun({ cwd: dir, ...roots(dir), prompt: "x".repeat(250_000) })
+      grokRun({ cwd: dir, ...roots(dir), background: false, prompt: "x".repeat(250_000) })
     );
     const parsed = envelope(result);
 
@@ -480,7 +482,7 @@ console.log(JSON.stringify({ type: "end", sessionId: "s1" }));
   it("blocks Codex private runtime paths as a typed business error", async () => {
     const dir = await tempDir();
     const stateDir = await tempDir();
-    const result = await grokRun({ cwd: dir, ...roots(dir), prompt: "Read ~/.codex/config.toml." });
+    const result = await grokRun({ cwd: dir, ...roots(dir), background: false, prompt: "Read ~/.codex/config.toml." });
     const parsed = envelope(result);
 
     expect(result.isError).toBe(true);
@@ -502,7 +504,7 @@ printf '%s\n' '{"type":"text","data":"diagnosis"}' '{"type":"end","stopReason":"
     );
 
     const result = await withEnv({ GROK_BIN: grokBin, GROK_PLUGIN_STATE_DIR: stateDir }, () =>
-      grokRescue({ cwd: dir, ...roots(dir), problem: "diagnose" })
+      grokRescue({ cwd: dir, ...roots(dir), background: false, problem: "diagnose" })
     );
     const parsed = envelope(result);
     const argv = await readFile(argsFile, "utf8");
@@ -515,7 +517,7 @@ printf '%s\n' '{"type":"text","data":"diagnosis"}' '{"type":"end","stopReason":"
 
   it("requires an explicit continue target before probing the CLI", async () => {
     const dir = await tempDir();
-    const result = await grokContinue({ cwd: dir, ...roots(dir), prompt: "continue" });
+    const result = await grokContinue({ cwd: dir, ...roots(dir), background: false, prompt: "continue" });
     const parsed = envelope(result);
 
     expect(parsed.error.code).toBe("continue_target_required");
@@ -524,7 +526,7 @@ printf '%s\n' '{"type":"text","data":"diagnosis"}' '{"type":"end","stopReason":"
   it("rejects session identifiers that look like CLI flags", async () => {
     const dir = await tempDir();
     const continued = envelope(
-      await grokContinue({ cwd: dir, ...roots(dir), prompt: "continue", sessionId: "--help" })
+      await grokContinue({ cwd: dir, ...roots(dir), background: false, prompt: "continue", sessionId: "--help" })
     );
     const exported = envelope(await grokExport({ cwd: dir, ...roots(dir), sessionId: "--help" }));
 
@@ -582,7 +584,7 @@ printf '%s\n' '{"type":"text","data":"diagnosis"}' '{"type":"end","stopReason":"
     const stateDir = join(dir, ".private-state");
     const grokBin = await makeExecutable(join(dir, "grok"), fakeGrokScript());
     const result = await withEnv({ GROK_BIN: grokBin, GROK_PLUGIN_STATE_DIR: stateDir }, () =>
-      grokRun({ cwd: dir, ...roots(dir), prompt: "state isolation probe" })
+      grokRun({ cwd: dir, ...roots(dir), background: false, prompt: "state isolation probe" })
     );
     const parsed = envelope(result);
 
@@ -599,7 +601,7 @@ printf '%s\n' '{"type":"text","data":"diagnosis"}' '{"type":"end","stopReason":"
 
     const parsed = envelope(
       await withEnv({ GROK_BIN: grokBin, GROK_PLUGIN_STATE_DIR: stateDir }, () =>
-        grokRun({ cwd, ...roots(root), prompt: "root-wide state isolation probe" })
+        grokRun({ cwd, ...roots(root), background: false, prompt: "root-wide state isolation probe" })
       )
     );
 
@@ -615,7 +617,7 @@ printf '%s\n' '{"type":"text","data":"diagnosis"}' '{"type":"end","stopReason":"
 
     const parsed = envelope(
       await withEnv({ GROK_BIN: grokBin, GROK_PLUGIN_STATE_DIR: stateDir }, () =>
-        grokRun({ cwd: root, ...roots(root), prompt: "ancestor state isolation probe" })
+        grokRun({ cwd: root, ...roots(root), background: false, prompt: "ancestor state isolation probe" })
       )
     );
 

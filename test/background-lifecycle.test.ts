@@ -292,7 +292,12 @@ describe("background lifecycle across MCP restarts", () => {
       .callTool(
         {
           name: "grok_run",
-          arguments: { cwd: workspace, prompt: "foreground crash cleanup probe", timeoutMs: 5_000 }
+          arguments: {
+            cwd: workspace,
+            prompt: "foreground crash cleanup probe",
+            background: false,
+            timeoutMs: 5_000
+          }
         },
         undefined,
         { timeout: 10_000 }
