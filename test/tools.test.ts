@@ -649,6 +649,9 @@ printf '%s\n' '{"type":"text","data":"diagnosis"}' '{"type":"end","stopReason":"
     expect(parsed.error.code).toBe("internal_error");
     expect(parsed.error.message).toBe("The plugin encountered an internal error. Retry or run grok_check for diagnostics.");
     expect(result.content[0].text).not.toContain("/dev/null");
-    expect(result.content[0].text).not.toContain("ENOTDIR");
+    // GK9(d): the errno is the one discriminator the caller gets — it names the failure class without
+    // naming any path, message, or prompt text.
+    expect(parsed.error.details).toEqual({ cause: "Error", errnoCode: "ENOTDIR" });
+    expect(JSON.stringify(parsed.error.details)).not.toMatch(/\//);
   });
 });

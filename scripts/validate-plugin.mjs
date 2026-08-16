@@ -69,6 +69,11 @@ if (
 ) {
   errors.push("plugin build metadata must be a single +codex.<cachebuster> suffix");
 }
+// X8: the published manifest version must never carry the author's local cachebuster. Set
+// GROK_PLUGIN_RELEASE=1 on a tag or release build to enforce that.
+if (process.env.GROK_PLUGIN_RELEASE === "1" && String(manifest.version).includes("+codex.")) {
+  errors.push("release builds must not publish a +codex.<cachebuster> manifest version");
+}
 const serverSource = existsSync(serverSourcePath) ? readFileSync(serverSourcePath, "utf8") : "";
 if (!serverSource.includes(`version: "${packageJson.version}"`)) {
   errors.push("MCP server version must match package base version");

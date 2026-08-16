@@ -450,6 +450,9 @@ export function classifyGrokErrorText(textValue: string, result?: Pick<ProcessRe
   if (text.includes("model") && (text.includes("not found") || text.includes("unavailable") || text.includes("not authorized"))) {
     return "model_unavailable";
   }
+  // GK9(a): a recorded run with grok-composer-2.5-fast failed with `tool_output_error` because the
+  // model could not consume its own Read output. Retrying with the same model cannot help.
+  if (text.includes("tool_output_error")) return "model_tool_incompatible";
   if (text.includes("unknown argument") || text.includes("unexpected argument") || text.includes("unrecognized option")) {
     return "cli_incompatible";
   }
@@ -511,6 +514,12 @@ export function grokFailureMessage(code: string): string {
         "The Grok CLI no longer has that session. error.details.candidateSessions lists the sessions this " +
         "plugin started in the same workspace, newest first; or retry with fallbackToLatest: true to " +
         "continue the latest session in this workspace."
+      );
+    case "model_tool_incompatible":
+      return (
+        "The selected Grok model could not consume its own tool output (tool_output_error). Fast composer " +
+        "models fail this way on repository work. Rerun with a full model instead; retrying the same model " +
+        "will fail identically."
       );
     case "model_unavailable":
       return "The requested Grok model is unavailable or unauthorized. Verify it with the current account.";

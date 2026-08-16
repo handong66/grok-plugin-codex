@@ -49,7 +49,44 @@ let workspaceRootsProvider: WorkspaceRootsProvider = async () => [process.cwd()]
  */
 let lastKnownWorkspaceRoots: string[] = [];
 
+/**
+ * GK9(c): the one model known not to accept `--reasoning-effort` was a hard-coded literal, which
+ * contradicts the rule that model capabilities come from the installed CLI. The set is now derived
+ * from `grok models` (cached per CLI version) and this literal is only the fallback for a CLI that
+ * cannot be asked.
+ */
 const COMPOSER_FAST_MODEL = "grok-composer-2.5-fast";
+const FAST_COMPOSER_PATTERN = /composer.*fast|fast.*composer/i;
+const modelCatalogByVersion = new Map<string, { ids: string[]; reasoningEffortUnsupported: string[] }>();
+
+export function clearModelCatalogCache(): void {
+  modelCatalogByVersion.clear();
+}
+
+async function modelCatalog(
+  cwd: string,
+  version: string | undefined
+): Promise<{ ids: string[]; reasoningEffortUnsupported: string[] }> {
+  const key = version ?? "unknown";
+  const cached = modelCatalogByVersion.get(key);
+  if (cached) return cached;
+  const fallback = { ids: [], reasoningEffortUnsupported: [COMPOSER_FAST_MODEL] };
+  const listed = await runGrok(withGlobalCwd(cwd, ["models"]), { cwd, timeoutMs: DEFAULT_DISCOVERY_TIMEOUT_MS }).catch(
+    () => null
+  );
+  if (!listed || listed.exitCode !== 0) return fallback;
+  const parsed = parseModelsOutput(listed.stdout || listed.stderr);
+  const ids = parsed.availableModels.map((model) => model.id);
+  if (!ids.length) return fallback;
+  const catalog = {
+    ids,
+    reasoningEffortUnsupported: [
+      ...new Set([...ids.filter((id) => FAST_COMPOSER_PATTERN.test(id)), COMPOSER_FAST_MODEL])
+    ]
+  };
+  modelCatalogByVersion.set(key, catalog);
+  return catalog;
+}
 /**
  * GPC-08 + SPEC §D M3 + GK3. The single 600s default was rejected on the grounds that only 1 of 128
  * recorded jobs used it, but that sample is one week of persisted jobs; across the whole window the
@@ -340,12 +377,20 @@ function success<T extends Record<string, unknown>>(data: T, warnings: string[] 
   return toolResult<T>({ ok: true, data, error: null, warnings });
 }
 
+/**
+ * GK9(d): every non-`GrokPluginError` used to collapse into one bare `internal_error`, so a lock
+ * timeout and a missing file were indistinguishable. The discriminator is the error's own name and
+ * errno — never a message, which could carry a path or prompt text.
+ */
 function asPluginError(error: unknown): GrokPluginError {
   if (error instanceof GrokPluginError) return error;
+  const cause = error instanceof Error ? error.name : typeof error;
+  const errnoCode = (error as NodeJS.ErrnoException | undefined)?.code;
   return new GrokPluginError(
     "internal_error",
     "The plugin encountered an internal error. Retry or run grok_check for diagnostics.",
-    true
+    true,
+    { cause, ...(typeof errnoCode === "string" ? { errnoCode } : {}) }
   );
 }
 
@@ -409,7 +454,13 @@ function withGlobalCwd(cwd: string, args: string[]): string[] {
 }
 
 function addCommonCommandArgs(
-  params: CommonArgs & { readOnly?: boolean; capabilities?: GrokCapabilities }
+  params: CommonArgs & {
+    readOnly?: boolean;
+    capabilities?: GrokCapabilities;
+    /** Model ids the installed CLI advertises, when they could be listed (GK9(c), GPC-10.5). */
+    knownModels?: string[];
+    reasoningEffortUnsupported?: string[];
+  }
 ): { args: string[]; warnings: string[] } {
   const args = ["--cwd", params.cwd];
   const warnings: string[] = [];
@@ -421,6 +472,22 @@ function addCommonCommandArgs(
   } else if (params.noSubagents) {
     args.push("--no-subagents");
   }
+  if (params.model && params.knownModels?.length && !params.knownModels.includes(params.model)) {
+    // GPC-10.5: a typo or a model the account cannot see costs a whole run to discover otherwise.
+    warnings.push(
+      `model "${params.model}" is not in the model list this Grok CLI reports (${params.knownModels.join(", ")}). ` +
+        "The call still runs as given; a wrong id fails at the provider."
+    );
+  }
+  if (params.model && FAST_COMPOSER_PATTERN.test(params.model) && params.readOnly) {
+    // GK9(a): the recorded `tool_output_error` came from this model failing to consume its own Read
+    // output, which is exactly what a repository review consists of.
+    warnings.push(
+      `model "${params.model}" is a fast composer model; a recorded run with it failed with ` +
+        "tool_output_error because it could not consume its own file-read output. It is not suited to " +
+        "repository review."
+    );
+  }
   if (params.maxTurns !== undefined) args.push("--max-turns", String(params.maxTurns));
   if (!params.readOnly && params.alwaysApprove === true) args.push("--always-approve");
 
@@ -429,8 +496,8 @@ function addCommonCommandArgs(
       warnings.push("The installed Grok CLI does not advertise --reasoning-effort; the option was not passed.");
     } else if (!params.model) {
       warnings.push("reasoningEffort was not passed because no explicit model was selected.");
-    } else if (params.model === COMPOSER_FAST_MODEL) {
-      warnings.push(`${COMPOSER_FAST_MODEL} does not support --reasoning-effort; the option was not passed.`);
+    } else if ((params.reasoningEffortUnsupported ?? [COMPOSER_FAST_MODEL]).includes(params.model)) {
+      warnings.push(`${params.model} does not support --reasoning-effort; the option was not passed.`);
     } else {
       args.push("--reasoning-effort", params.reasoningEffort);
     }
@@ -486,7 +553,9 @@ function missingRunCapabilities(
   ].filter(Boolean);
 }
 
-async function requiredRunCapabilities(params: CommonArgs & { readOnly: boolean }): Promise<GrokCapabilities> {
+async function requiredRunCapabilities(
+  params: CommonArgs & { readOnly: boolean }
+): Promise<GrokCapabilities & { cliVersion?: string }> {
   const discovered = await discoverGrok();
   if (!discovered.ok || !discovered.bin) {
     throw new GrokPluginError("grok_not_found", "Grok CLI was not found in the configured trusted locations.", false, {
@@ -503,7 +572,7 @@ async function requiredRunCapabilities(params: CommonArgs & { readOnly: boolean 
       missing
     });
   }
-  return probe.capabilities;
+  return { ...probe.capabilities, cliVersion: discovered.version };
 }
 
 async function runOrStartJob(params: CommonArgs & {
@@ -604,10 +673,16 @@ async function runOrStartJob(params: CommonArgs & {
       }
     }
     const capabilities = await requiredRunCapabilities({ ...params, cwd, readOnly });
-    const built =
-      params.kind === "continue"
-        ? buildContinueArgs({ ...params, cwd, capabilities, readOnly })
-        : buildRunArgs({ ...params, cwd, capabilities, readOnly });
+    const catalog = params.model ? await modelCatalog(cwd, capabilities.cliVersion) : undefined;
+    const commonArgs = {
+      ...params,
+      cwd,
+      capabilities,
+      readOnly,
+      knownModels: catalog?.ids,
+      reasoningEffortUnsupported: catalog?.reasoningEffortUnsupported
+    };
+    const built = params.kind === "continue" ? buildContinueArgs(commonArgs) : buildRunArgs(commonArgs);
     built.warnings.unshift(...inheritedWarnings);
     const timeoutMs = effectiveTimeoutMs(params.kind, params.timeoutMs);
     built.warnings.push(
@@ -1291,5 +1366,16 @@ export async function grokResult(args: {
 }
 
 export async function grokCancel(args: { jobId: string }) {
-  return await guarded(async () => success({ job: toPublicJob(await new JobStore().cancel(args.jobId)) }));
+  return await guarded(async () => {
+    const store = new JobStore();
+    // GK9(d): "cancelled a running job" and "the job had already finished" are different outcomes and
+    // used to be the same envelope. The distinction decides whether a result is still worth reading.
+    const before = await store.read(args.jobId);
+    const alreadyTerminal = TERMINAL_JOB_STATUSES.has(before.status);
+    const job = alreadyTerminal ? before : await store.cancel(args.jobId);
+    return success({
+      outcome: alreadyTerminal ? "already_terminal" : "cancel_requested",
+      job: toPublicJob(job)
+    });
+  });
 }

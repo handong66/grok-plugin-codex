@@ -72,6 +72,24 @@ All notable user-visible and contract changes to `grok-plugin-codex`.
 
 ### Added
 
+- **GK9(a) — `tool_output_error` was unclassified.** A recorded run with `grok-composer-2.5-fast`
+  failed because the model could not consume its own `Read` output; it landed in the generic bucket.
+  New code **`model_tool_incompatible`** (non-retryable) says so and says to rerun with a full model,
+  and selecting a fast composer model for read-only repository work now warns up front.
+- **GK9(c) — model capabilities are derived, not hard-coded.** The `--reasoning-effort` exclusion was
+  the literal `grok-composer-2.5-fast`. It is now derived from `grok models` (cached per CLI version),
+  with the literal only as the fallback for a CLI that cannot be asked. A model the installed CLI does
+  not list now warns before the run instead of failing at the provider (GPC-10.5).
+- **GK9(d) — cancel had one shape for two outcomes.** `grok_cancel` returns
+  **`data.outcome: "cancel_requested" | "already_terminal"`**, so a caller can tell a real
+  cancellation from a job that had already finished. Unexpected internal failures keep the generic
+  `internal_error` message but now carry `error.details.cause` and `errnoCode` — the failure class,
+  never a path or a message.
+- **GK9(e) — release cadence.** CONTRIBUTING and SECURITY now state that correctness fixes must be
+  mirrored publicly in the session that lands them (0.2.1 was private for five weeks while the public
+  marketplace served 0.2.0, which reported a cancelled run as complete). `npm run validate:plugin`
+  with `GROK_PLUGIN_RELEASE=1` fails a release build whose manifest still carries `+codex.` (X8).
+
 - **GK6 — `private_path_blocked` did not say what matched, or what to do instead.** Three recorded
   refusals each forced a full rewrite of the target. `error.details.blockedPath` now names the matched
   path (only the path — never the surrounding prompt), and the message points at `~/.grok/skills` as
