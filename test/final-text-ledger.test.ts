@@ -116,6 +116,46 @@ describe("GPC-03b final-text ledger", () => {
     expect(MAX_FINAL_TEXT_LEDGER_CHARS).toBe(4_000_000);
   }, 30_000);
 
+  /**
+   * FINAL Review M5. `<id>.summary.json` is rewritten whole every 25ms while a job streams. Writing
+   * it straight over the live path let a status poll read a truncated file: `readStreamProgress`
+   * could not parse it, returned `undefined`, and GPC-M3's "observed progress vetoes reaping" stopped
+   * vetoing — during the busiest writing, which is when the worker is most alive.
+   */
+  it("never lets a reader see a half-written stream summary", async () => {
+    const stateDir = await tempDir();
+    const store = new JobStore({ stateDir });
+    await store.ensure();
+    const jobId = "job_atomicsummary0000000000";
+    const previous = `${JSON.stringify({ version: 1, textChars: 1 })}\n`;
+    const next = `${JSON.stringify({ version: 1, textChars: 2, filler: "x".repeat(8_000_000) })}\n`;
+    await store.writeStreamSummary(jobId, previous);
+
+    const before = await stat(store.summaryPath(jobId));
+
+    let settled = false;
+    const writing = store.writeStreamSummary(jobId, next).finally(() => {
+      settled = true;
+    });
+    const observed = new Set<string>();
+    while (!settled) {
+      const raw = await readFile(store.summaryPath(jobId), "utf8").catch(() => "<missing>");
+      observed.add(raw === previous ? "previous" : raw === next ? "next" : `torn:${raw.length}`);
+    }
+    await writing;
+    const after = await stat(store.summaryPath(jobId));
+
+    // The discriminator: the live path is *replaced*, so it is a different file each time. Rewriting
+    // it in place keeps the same inode — and that is precisely the window in which a concurrent
+    // reader, or a reader holding an open descriptor, sees a truncated summary.
+    expect(after.ino).not.toBe(before.ino);
+    expect([...observed].filter((state) => state.startsWith("torn") || state === "<missing>")).toEqual([]);
+    expect(JSON.parse(await readFile(store.summaryPath(jobId), "utf8")).textChars).toBe(2);
+    // The staging file is not left behind, and it is as private as the file it replaces.
+    await expect(stat(store.summaryTempPath(jobId))).rejects.toThrow();
+    expect(after.mode & 0o077).toBe(0);
+  }, 30_000);
+
   it("accepts a pre-marker state directory that already holds ledger artifacts", async () => {
     const stateDir = await tempDir();
     const jobsDir = join(stateDir, "jobs");

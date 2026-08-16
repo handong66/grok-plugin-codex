@@ -154,7 +154,7 @@ async function isRecognizedPreMarkerStateDir(stateDir: string, stateMode: number
 
   for (const entry of jobEntries) {
     const match = entry.name.match(
-      /^(job_[A-Za-z0-9_-]{16,128})(?:\.json|\.stdout\.log|\.stderr\.log|\.worker\.log|\.final\.txt|\.summary\.json|\.heartbeat|\.cancel|\.input|\.lock)$/
+      /^(job_[A-Za-z0-9_-]{16,128})(?:\.json|\.stdout\.log|\.stderr\.log|\.worker\.log|\.final\.txt|\.summary\.json|\.summary\.json\.tmp|\.heartbeat|\.cancel|\.input|\.lock)$/
     );
     if (!match?.[1] || !validJobIds.has(match[1])) return false;
     const metadata = await lstat(join(jobsDir, entry.name)).catch(() => null);
@@ -271,6 +271,26 @@ export class JobStore {
   summaryPath(jobId: string): string {
     assertJobId(jobId);
     return join(this.jobsDir(), `${jobId}.summary.json`);
+  }
+
+  /** Staging name for the atomic summary write; never read, never left behind on success. */
+  summaryTempPath(jobId: string): string {
+    return `${this.summaryPath(jobId)}.tmp`;
+  }
+
+  /**
+   * FINAL Review M5: the summary is rewritten *whole* every 25ms while a job streams, and it used to
+   * be written straight over the live path. A reader that arrived mid-write got a truncated file,
+   * `readStreamProgress` could not parse it and returned `undefined` — so `grok_status` lost its
+   * progress fields and, worse, GPC-M3's "observed progress vetoes reaping" stopped vetoing, exactly
+   * during the busiest writing. Written to a sibling and renamed: the live path is replaced, never
+   * rewritten in place, so a reader sees the whole previous summary or the whole new one.
+   */
+  async writeStreamSummary(jobId: string, contents: string): Promise<void> {
+    const temporaryPath = this.summaryTempPath(jobId);
+    await writeFile(temporaryPath, contents, { mode: 0o600 });
+    await chmod(temporaryPath, 0o600);
+    await rename(temporaryPath, this.summaryPath(jobId));
   }
 
   /** Private capture of the worker process's own stderr; without it a hard crash is unreadable. */
@@ -909,6 +929,7 @@ export class JobStore {
         rm(this.workerLogPath(jobId), { force: true }),
         rm(this.finalTextPath(jobId), { force: true }),
         rm(this.summaryPath(jobId), { force: true }),
+        rm(this.summaryTempPath(jobId), { force: true }),
         rm(this.inputPath(jobId), { force: true }),
         rm(this.heartbeatPath(jobId), { force: true }),
         rm(this.cancelPath(jobId), { force: true }),

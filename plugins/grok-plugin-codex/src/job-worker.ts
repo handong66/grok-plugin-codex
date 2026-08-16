@@ -347,8 +347,8 @@ export async function runJobWorker(jobId: string, store = new JobStore()): Promi
     }
   };
   const writeLedgerSummary = async (): Promise<void> => {
-    await writeFile(store.summaryPath(jobId), ledger.serialize(), { mode: 0o600 });
-    await chmod(store.summaryPath(jobId), 0o600);
+    // M5: written to a sibling and renamed, so a status poll never reads half a summary.
+    await store.writeStreamSummary(jobId, ledger.serialize());
   };
   const flushLedger = async (): Promise<void> => {
     const text = ledger.takeText();
