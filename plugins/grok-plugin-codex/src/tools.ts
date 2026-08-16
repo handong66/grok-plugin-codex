@@ -17,6 +17,7 @@ import {
   type GrokInvocationProbe
 } from "./grok-cli.js";
 import { JobStore, toPublicJob } from "./job-store.js";
+import { SHELL_APPROVAL_REMEDY } from "./result-parser.js";
 import {
   GrokPluginError,
   type JobKind,
@@ -558,6 +559,7 @@ async function runOrStartJob(params: CommonArgs & {
       requestId: result.outputSummary.requestId,
       evidenceLevel: result.outputSummary.evidenceLevel,
       toolCallCount: result.outputSummary.toolCallCount,
+      deniedToolCalls: result.outputSummary.deniedToolCalls,
       textPreview: result.outputSummary.textPreview,
       streamError: result.outputSummary.streamError,
       guidance: result.outputSummary.guidance,
@@ -571,6 +573,18 @@ async function runOrStartJob(params: CommonArgs & {
       // A vendor-side `cancelled` stop reason is a different failure from an operator cancel, and
       // only the latter carries `cancelRequestedAt`.
       const requested = Boolean(result.record.cancelRequestedAt);
+      // GK5: when the cancellation followed a refused shell command, the cause is the enforced
+      // permission mode. Reporting it as a generic cancellation sent 13 recorded runs down the
+      // "narrow the target" path, which cannot fix a command that plan mode will never approve.
+      if (!requested && result.outputSummary.shellApprovalBlocked) {
+        throw new GrokPluginError(
+          "permission_denied_headless",
+          SHELL_APPROVAL_REMEDY,
+          false,
+          diagnosticDetails,
+          failureWarnings
+        );
+      }
       throw new GrokPluginError(
         requested ? "cancelled" : "cancelled_output",
         requested
@@ -622,6 +636,15 @@ async function runOrStartJob(params: CommonArgs & {
             "Inline the evidence into the target and rerun, or continue the session for the file:line " +
             "evidence behind each claim. The text is available through grok_result.",
           true,
+          diagnosticDetails,
+          failureWarnings
+        );
+      }
+      if (result.outputSummary.shellApprovalBlocked) {
+        throw new GrokPluginError(
+          "permission_denied_headless",
+          SHELL_APPROVAL_REMEDY,
+          false,
           diagnosticDetails,
           failureWarnings
         );

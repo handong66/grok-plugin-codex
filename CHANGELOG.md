@@ -16,6 +16,12 @@ All notable user-visible and contract changes to `grok-plugin-codex`.
   and that missing command output must be requested rather than guessed or failed. Refusals are
   counted in the new **`outputSummary.deniedToolCalls: { name, count }[]`**, raise a warning, and
   replace the guidance with "inline the required command output into the target".
+- **GK5 — `cancelled_output` blamed the target width for a permission refusal.** A run that ends
+  `Cancelled` right after a shell command was auto-refused in plan mode (13 recorded
+  `cancelled_output`) now returns the new non-retryable code **`permission_denied_headless`**, whose
+  message says the turn was cancelled because a shell command needed approval in plan mode and that
+  the remedy is to inline the command output or continue with "do not use tools". Narrowing the
+  target never addressed this shape.
 
 - **GPC-04 — quota exhaustion reported as retryable, or as an auth problem.** The quota patterns matched none
   of the vendor's real texts (the CLI writes `You’ve` with U+2019, so an ASCII-apostrophe pattern never fired),
