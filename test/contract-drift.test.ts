@@ -10,11 +10,16 @@ describe("published contract drift", () => {
     const packageJson = JSON.parse(await text("package.json"));
     const manifest = JSON.parse(await text("plugins/grok-plugin-codex/.codex-plugin/plugin.json"));
     const server = await text("plugins/grok-plugin-codex/src/server.ts");
+    const dist = await text("plugins/grok-plugin-codex/dist/server.js");
 
     expect(packageJson.version).toBe("0.2.1");
     expect(manifest.version).toMatch(/^0\.2\.1(?:\+codex\.[0-9A-Za-z.-]+)?$/);
     expect(manifest.version.split("+")[0]).toBe(packageJson.version);
-    expect(server).toContain(`version: "${packageJson.version}"`);
+    // GPC-10.2: the version is injected at build time, so the source must carry no literal and the
+    // built bundle must carry exactly the package version.
+    expect(server).toContain("version: PLUGIN_VERSION");
+    expect(server).not.toMatch(/version:\s*"\d+\.\d+\.\d+/);
+    expect(dist).toContain(`"${packageJson.version}"`);
   });
 
   test("the package declares the operating systems whose process-tree lifecycle is supported", async () => {

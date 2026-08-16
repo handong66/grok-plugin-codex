@@ -239,7 +239,10 @@ exit 99
 
     expect(parsed.ok).toBe(true);
     expect(parsed.data.modelsListed).toBe(false);
-    expect(parsed.data.authenticated).toBeNull();
+    // GK1 third item / GPC-10.3: an undetermined fact is reported as "unknown", never as null —
+    // a recorded gate decision read the null as "not authenticated" and let the next job start.
+    expect(parsed.data.authenticated).toBe("unknown");
+    expect(parsed.data.entitled).toBe("unknown");
   });
 
   it("grok_check proves callability only when the invocation probe is explicitly requested", async () => {

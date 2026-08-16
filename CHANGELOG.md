@@ -72,6 +72,19 @@ All notable user-visible and contract changes to `grok-plugin-codex`.
 
 ### Added
 
+- **GPC-10 / GK1(3) / X10 — `grok_check` was unavailable when it was needed and reported facts it had
+  not established.** `workspace_unavailable` used to kill the diagnostic itself: recorded once, with
+  the caller reading the plugin's source to understand the message. `grok_check` and `grok_models` now
+  degrade — with an explicit `cwd` and no workspace roots they run without the boundary check and warn
+  — while every execution and session tool keeps failing closed. `authenticated` and the new
+  **`entitled`** are `true`, `false`, or the string **`"unknown"`**, never `null`, because a recorded
+  gate decision read `null` as "not authenticated" and let the next job start anyway; `entitled: false`
+  separates "logged in but out of quota" from "not logged in". `pluginVersion` is injected from
+  package.json at build time instead of being a `"0.2.1"` literal, and `validate:plugin` fails a
+  source that hard-codes a version. A requested `model` missing from the CLI's own list now warns. The
+  check also warns when a 0.1-era `.grok-plugin-codex/` or `.opencode-plugin-codex/` directory is still
+  sitting in the workspace, without touching it (X10).
+
 - **X3 — an adversarial review interrupted the user's own task.** Attack-framed review prose tripped
   the host's cybersecurity filter mid-run; the user's response that evening was "I am building a film
   system for local use, so network security does not apply. Please stop interrupting my task."

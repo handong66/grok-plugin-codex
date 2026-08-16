@@ -3,6 +3,7 @@ import { mkdtemp, realpath, rm, stat, writeFile } from "node:fs/promises";
 import { homedir, tmpdir } from "node:os";
 import { basename, dirname, isAbsolute, join, relative, resolve, sep } from "node:path";
 import {
+  classifyGrokErrorText,
   classifyGrokFailure,
   discoverGrok,
   parseModelsOutput,
@@ -18,6 +19,7 @@ import {
 } from "./grok-cli.js";
 import { JobStore, toPublicJob } from "./job-store.js";
 import { SHELL_APPROVAL_REMEDY } from "./result-parser.js";
+import { PLUGIN_VERSION } from "./version.js";
 import {
   GrokPluginError,
   type JobKind,
@@ -334,8 +336,27 @@ async function resolveWorkspaceCwd(
   return candidate;
 }
 
-async function resolveDiscoveryCwd(cwd?: string, requestRoots: string[] = []): Promise<string> {
-  if (cwd) return await resolveWorkspaceCwd(cwd, requestRoots);
+/**
+ * GPC-10.1: diagnostics must stay reachable exactly when the workspace metadata is missing — that is
+ * the moment a caller needs to know whether the CLI works at all. Execution and session tools keep
+ * failing closed; only `grok_check` / `grok_models` degrade, and they say so in a warning.
+ */
+async function resolveDiscoveryCwd(
+  cwd?: string,
+  requestRoots: string[] = [],
+  onWarning?: (warning: string) => void
+): Promise<string> {
+  if (cwd) {
+    try {
+      return await resolveWorkspaceCwd(cwd, requestRoots, false, onWarning);
+    } catch (error) {
+      if (!(error instanceof GrokPluginError) || error.code !== "workspace_unavailable") throw error;
+      onWarning?.(
+        "The MCP client supplied no workspace roots; diagnostics ran without a workspace boundary check."
+      );
+      return await realpath(resolve(cwd)).catch(() => homedir());
+    }
+  }
 
   const roots = await canonicalWorkspaceRoots(requestRoots);
   return roots[0] ?? process.cwd();
@@ -921,6 +942,24 @@ async function runInvocationProbe(
   }
 }
 
+/** X10: the 0.1-era workspace-local job directories are still sitting in users' repositories. */
+const LEGACY_WORKSPACE_DIRS = [".grok-plugin-codex", ".opencode-plugin-codex"];
+
+async function legacyWorkspaceDirWarnings(cwd: string): Promise<string[]> {
+  const warnings: string[] = [];
+  for (const name of LEGACY_WORKSPACE_DIRS) {
+    const metadata = await stat(join(cwd, name)).catch(() => null);
+    if (metadata?.isDirectory()) {
+      warnings.push(
+        `${name}/ is a leftover 0.1-era job directory inside this workspace. Current job state lives in ` +
+          "the private user state directory, so it is safe to delete and to add to .gitignore. The plugin " +
+          "does not read or remove it."
+      );
+    }
+  }
+  return warnings;
+}
+
 export async function grokCheck(args: {
   cwd?: string;
   timeoutMs?: number;
@@ -939,12 +978,16 @@ export async function grokCheck(args: {
     }
     const probe = await probeGrokCapabilities(discovered.bin, { timeoutMs: args.timeoutMs ?? 5_000 });
     const base = {
-      pluginVersion: "0.2.1",
+      pluginVersion: PLUGIN_VERSION,
       contractVersion: "2",
       cliDiscovered: true,
       version: discovered.version,
       capabilities: probe.capabilities,
-      authenticated: null as boolean | null,
+      // GK1 third item: `null` read as "not authenticated" in at least one recorded gate decision.
+      // The honest value for "this check did not establish it" is the word.
+      authenticated: "unknown" as boolean | "unknown",
+      // GPC-10.4: "logged in" and "has quota" are different facts; a 402 account lists models fine.
+      entitled: "unknown" as boolean | "unknown",
       modelsListed: false,
       modelInvocationTested: false,
       callable: null as boolean | null
@@ -954,8 +997,9 @@ export async function grokCheck(args: {
     }
     if (args.includeModels === false && !args.probeInvocation) return success(base);
 
-    const cwd = await resolveDiscoveryCwd(args.cwd, args._workspaceRoots);
     const warnings: string[] = [];
+    const cwd = await resolveDiscoveryCwd(args.cwd, args._workspaceRoots, (warning) => warnings.push(warning));
+    warnings.push(...(await legacyWorkspaceDirWarnings(cwd)));
     let invocation: GrokInvocationProbe | undefined;
     if (args.probeInvocation) {
       // The probe is a real, quota-spending Grok call in the read-only shape, so it goes through the
@@ -992,17 +1036,28 @@ export async function grokCheck(args: {
     });
     const parsed = parseModelsOutput(models.stdout || models.stderr);
     if (models.exitCode !== 0) {
-      throw new GrokPluginError(classifyGrokFailure(models), "Grok model discovery failed.", true, {
+      const failureCode = classifyGrokFailure(models);
+      throw new GrokPluginError(failureCode, "Grok model discovery failed.", true, {
         ...probed,
         authenticated: parsed.loggedIn,
+        entitled: failureCode.startsWith("quota_") ? false : probed.entitled,
         modelsListed: false,
         exitCode: models.exitCode
       });
+    }
+    const quotaCode = classifyGrokErrorText(`${models.stdout}\n${models.stderr}`);
+    const entitled = quotaCode.startsWith("quota_") ? false : invocation?.callable === true ? true : "unknown";
+    if (args.model && parsed.availableModels.length && !parsed.availableModels.some((model) => model.id === args.model)) {
+      warnings.push(
+        `model "${args.model}" is not in the list this Grok CLI reports ` +
+          `(${parsed.availableModels.map((model) => model.id).join(", ")}).`
+      );
     }
     return success(
       {
         ...probed,
         authenticated: parsed.loggedIn,
+        entitled,
         modelsListed: true,
         models: parsed
       },
@@ -1013,7 +1068,8 @@ export async function grokCheck(args: {
 
 export async function grokModels(args: { cwd?: string; timeoutMs?: number; _workspaceRoots?: string[] }) {
   return await guarded(async () => {
-    const cwd = await resolveDiscoveryCwd(args.cwd, args._workspaceRoots);
+    const warnings: string[] = [];
+    const cwd = await resolveDiscoveryCwd(args.cwd, args._workspaceRoots, (warning) => warnings.push(warning));
     const result = await runGrok(withGlobalCwd(cwd, ["models"]), {
       cwd,
       timeoutMs: args.timeoutMs ?? DEFAULT_DISCOVERY_TIMEOUT_MS
@@ -1023,7 +1079,10 @@ export async function grokModels(args: { cwd?: string; timeoutMs?: number; _work
         exitCode: result.exitCode
       });
     }
-    return success({ raw: result.stdout || result.stderr, parsed: parseModelsOutput(result.stdout || result.stderr) });
+    return success(
+      { raw: result.stdout || result.stderr, parsed: parseModelsOutput(result.stdout || result.stderr) },
+      warnings
+    );
   });
 }
 

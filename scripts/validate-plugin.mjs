@@ -75,8 +75,13 @@ if (process.env.GROK_PLUGIN_RELEASE === "1" && String(manifest.version).includes
   errors.push("release builds must not publish a +codex.<cachebuster> manifest version");
 }
 const serverSource = existsSync(serverSourcePath) ? readFileSync(serverSourcePath, "utf8") : "";
-if (!serverSource.includes(`version: "${packageJson.version}"`)) {
-  errors.push("MCP server version must match package base version");
+// GPC-10.2: the MCP server version is injected at build time, so the source must not carry a literal
+// and the built bundle must carry exactly the package version.
+if (!serverSource.includes("version: PLUGIN_VERSION")) {
+  errors.push("MCP server must advertise the build-injected PLUGIN_VERSION");
+}
+if (/version:\s*"\d+\.\d+\.\d+/.test(serverSource)) {
+  errors.push("MCP server source must not hard-code a version literal");
 }
 if (manifest.skills !== "./skills/") errors.push("skills must point to ./skills/");
 if (manifest.mcpServers !== "./.mcp.json") errors.push("mcpServers must point to ./.mcp.json");
@@ -122,6 +127,9 @@ if (!skill.includes("resultComplete")) errors.push("skill must document backgrou
 if (!skill.includes("$grok-codex-collaboration")) errors.push("skill must route orchestration to grok-codex-collaboration");
 
 const dist = existsSync(distPath) ? readFileSync(distPath, "utf8") : "";
+if (dist && !dist.includes(`"${packageJson.version}"`)) {
+  errors.push("dist/server.js must embed the package version");
+}
 if (!dist.startsWith("#!/usr/bin/env node")) errors.push("dist/server.js must be executable Node script with shebang");
 const workerDist = existsSync(workerDistPath) ? readFileSync(workerDistPath, "utf8") : "";
 if (!workerDist.startsWith("#!/usr/bin/env node")) errors.push("dist/job-worker.js must be executable Node script with shebang");

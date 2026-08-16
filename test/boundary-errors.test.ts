@@ -1,12 +1,14 @@
+import { mkdir, readFile } from "node:fs/promises";
 import { join } from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
 import {
   configureWorkspaceRootsProvider,
+  grokCheck,
   grokContinue,
   grokReview,
   grokRun
 } from "../plugins/grok-plugin-codex/src/tools.js";
-import { makeExecutable, tempDir } from "./helpers.js";
+import { fakeGrokScript, makeExecutable, tempDir } from "./helpers.js";
 
 type ToolResult = { content: Array<{ type: string; text: string }>; isError?: boolean };
 
@@ -156,5 +158,35 @@ printf '%s\\n' '{"type":"text","data":"recovered"}' '{"type":"end","stopReason":
     expect(parsed.ok).toBe(true);
     expect(parsed.data.finalText).toBe("recovered");
     expect((parsed.warnings as string[]).join("\n")).toContain("fallbackToLatest");
+  });
+});
+
+describe("GPC-10 diagnostics stay reachable", () => {
+  it("runs grok_check without workspace roots when the caller named a cwd", async () => {
+    configureWorkspaceRootsProvider(async () => []);
+    const workspace = await tempDir();
+    const grokBin = await makeExecutable(join(workspace, "grok"), fakeGrokScript());
+
+    const parsed = envelope(await withEnv({ GROK_BIN: grokBin }, () => grokCheck({ cwd: workspace })));
+
+    expect(parsed.ok).toBe(true);
+    expect(parsed.data.cliDiscovered).toBe(true);
+    expect((parsed.warnings as string[]).join("\n")).toContain("no workspace roots");
+    // GPC-10.2: no literal — the reported version is whatever package.json says.
+    const packageVersion = JSON.parse(await readFile("package.json", "utf8")).version;
+    expect(parsed.data.pluginVersion).toBe(packageVersion);
+  });
+
+  it("warns about a leftover 0.1-era job directory in the workspace", async () => {
+    const workspace = await tempDir();
+    await mkdir(join(workspace, ".grok-plugin-codex"), { recursive: true });
+    const grokBin = await makeExecutable(join(workspace, "grok"), fakeGrokScript());
+
+    const parsed = envelope(
+      await withEnv({ GROK_BIN: grokBin }, () => grokCheck({ cwd: workspace, _workspaceRoots: [workspace] }))
+    );
+
+    expect((parsed.warnings as string[]).join("\n")).toContain(".grok-plugin-codex/");
+    expect((parsed.warnings as string[]).join("\n")).toContain("safe to delete");
   });
 });

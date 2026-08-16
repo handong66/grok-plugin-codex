@@ -4,6 +4,7 @@ import { StdioServerTransport } from "@modelcontextprotocol/sdk/server/stdio.js"
 import { isAbsolute } from "node:path";
 import { fileURLToPath } from "node:url";
 import { z } from "zod";
+import { PLUGIN_VERSION } from "./version.js";
 import {
   configureWorkspaceRootsProvider,
   grokAdversarialReview,
@@ -22,7 +23,7 @@ import {
 } from "./tools.js";
 
 const server = new McpServer(
-  { name: "grok-plugin-codex", version: "0.2.1" },
+  { name: "grok-plugin-codex", version: PLUGIN_VERSION },
   {
     instructions:
       "Use these tools to operate Grok CLI without transferring hidden Codex context, secrets, system/developer messages, tool output, or private runtime paths. Codex owns scope, verification, git, and final judgment."
@@ -136,8 +137,13 @@ server.registerTool(
   {
     title: "Check Grok",
     description:
-      "Separate Grok CLI discovery, capability compatibility, authentication/model listing, and actual model-call evidence. " +
-      "modelInvocationTested and callable stay false/null unless probeInvocation is explicitly requested.",
+      "Separate Grok CLI discovery, capability compatibility, authentication/model listing, entitlement, and " +
+      "actual model-call evidence. authenticated and entitled are true, false, or the string \"unknown\" — " +
+      "never null — so an undetermined fact cannot be read as a negative one. entitled is false only when " +
+      "the CLI reported a quota stop, and true only when an invocation probe answered. " +
+      "modelInvocationTested and callable stay false/null unless probeInvocation is explicitly requested. " +
+      "With a cwd given but no workspace roots this tool degrades to an unbounded diagnostic run with a " +
+      "warning, so diagnostics stay reachable exactly when the workspace metadata is missing.",
     inputSchema: {
       cwd: cwdOptional,
       includeModels: z.boolean().optional(),
