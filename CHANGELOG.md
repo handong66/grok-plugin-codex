@@ -10,8 +10,9 @@ defaults per kind instead of `600000`; `grok_result` omits raw log tails unless 
 `target`/`problem` or the sibling spelling `prompt`; `grok_check` reports `authenticated` / `entitled`
 as `true` / `false` / `"unknown"` rather than `null`; new tool `grok_finalize`; new codes
 `quota_free_tier`, `no_evidence_review`, `permission_denied_headless`, `readonly_session_escalation`,
-`foreground_wait_timeout`, `model_tool_incompatible`, `target_required`, `finalize_target_unknown`;
-`workspace_unavailable` is now retryable; the recovery handle's `suggested.tool` is `grok_finalize`
+`foreground_wait_timeout`, `model_tool_incompatible`, `target_required`, `finalize_target_unknown`,
+`invalid_finalize_target`; `workspace_unavailable` is now retryable and `no_evidence_review` is not;
+the recovery handle's `suggested.tool` is `grok_finalize`
 (the `grok_continue` spelling moved to `recovery.fallback`); `grok_models`' `parsed.loggedIn` is
 `true` / `false` / `"unknown"`; `grok_check` / `grok_models` / `grok_sessions` / `grok_export` report
 `retryable` from the failure classifier instead of always `true`.
@@ -428,3 +429,54 @@ as `true` / `false` / `"unknown"` rather than `null`; new tool `grok_finalize`; 
   `npm test` and `npm run check`: unit tests never call the real API.
 - Error messages and bundled documentation no longer name a single literal stop reason;
   `incomplete_output` now reads "without … a normal end event".
+
+### Release polish
+
+The last pass before 0.3.0 was tagged, closing the remaining adjudicated minor findings.
+
+- **The live gate for 0.3.0 has been run and recorded.** `npm run smoke:live-grok` passed on
+  2026-08-16 against Grok CLI 1.0.3, and `docs/verification.md` carries the dated record naming that
+  CLI version. `GROK_PLUGIN_RELEASE=1 npm run validate:plugin` now exits 0; it refused the release
+  while the record still said the gate had never run.
+- **X11 — the smoke run prints a record that can actually be pasted.** It printed
+  `Grok CLI <x.y.z>` on `<platform>`, which the release gate's own `Grok CLI <x.y.z>` rule rejects by
+  construction. The CLI version now comes from the plugin's own discovery and the platform from the
+  running process.
+- **X10 — `no_evidence_review` is not retryable (contract change).** The run succeeded, so an
+  obedient retry spent another full budget (240 s for review, 300 s for adversarial review) to buy
+  the same opinion, while the text was already readable through `grok_result`.
+- **X12 — answers between 1 MB and 4 MB are no longer silently beheaded.** The worker's answer
+  ledger holds up to 4 M characters, but the read that served it back took a 1 M-character *tail*, so
+  a long answer lost its opening and was still reported `resultComplete: true`, with
+  `finalTextOffset` paging the truncated window.
+- **X13 — `grok_check` / `grok_models` no longer relocate to the home directory.** When the MCP
+  client supplies no workspace roots, only the boundary check degrades: a `cwd` that does not exist
+  is `workspace_not_found` and one that is not a directory is `workspace_invalid`, instead of the
+  diagnostics — including the quota-spending invocation probe — quietly running somewhere else.
+- **X14 — `grok_finalize` refuses a contradictory target (contract change).** `jobId` was read only
+  when `sessionId` was absent, so a call naming both finalized the session and discarded the job
+  without a word. A pair that does not resolve to the same Grok session is now the non-retryable
+  `invalid_finalize_target`.
+- **X15 — `grok_cancel` no longer calls a finished job cancelled.** The outcome came from the record
+  read *before* the cancel, so a worker that finished in between was reported `cancel_requested` and
+  a caller treating that as "no answer here" discarded a complete result.
+- **X16 — a failed invocation probe says why.** It reported only `exited N`, discarding the CLI's
+  error events and stderr; a quota-exhausted account whose `grok models` still succeeds now reports
+  `entitled: false` instead of `"unknown"`, and the warning quotes the vendor's own words (redacted,
+  and never the one-time device code).
+- **`auth_required` covers the recorded "not signed in" wording**, which the plugin's own
+  device-authorization message also uses; both used to come back as a retryable `grok_failed`.
+- **`outputSummary.skillsLoaded` no longer counts the reviewed repository's own `SKILL.md`.** Only a
+  skill file read from outside the job's workspace is a persona load.
+- **`grok_status` progress is reliable while a job streams.** The stream summary is replaced
+  atomically instead of being rewritten in place every 25 ms, so a poll can no longer read half a
+  file — which also silently disabled the rule that observed progress prevents a live worker from
+  being reaped.
+- **The state-directory containment check uses the same workspace roots that authorised the call**,
+  including the roots remembered from an earlier turn.
+- **The large-target warning measures the caller's target**, not the ~1.5 k characters of preamble
+  the plugin adds to it.
+- Documentation: the bundled skill now states the accepted `target` / `prompt` (and
+  `problem` / `prompt`) spellings and the `target_required` / `target_too_large` refusals; the
+  release checklist no longer teaches the local `+codex.<cachebuster>` suffix that the release gate
+  rejects; and the GPC-07 entry above no longer overstates the removal of duplicate answer text.
