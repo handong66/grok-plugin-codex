@@ -1,5 +1,10 @@
 import type { JobOutputSummary, JobRecord, PluginErrorInfo } from "./types.js";
-import { classifyGrokErrorText, grokFailureMessage, isRetryableGrokFailure } from "./grok-cli.js";
+import {
+  CONTINUE_WITHOUT_TOOLS_REMEDY,
+  classifyGrokErrorText,
+  grokFailureMessage,
+  isRetryableGrokFailure
+} from "./grok-cli.js";
 
 /** Grok has shipped both `EndTurn` and `end_turn`; compare on a case/separator-free form. */
 export function normalizeStopReason(value: string | undefined): string {
@@ -144,13 +149,15 @@ export function summarizeGrokOutput(
   } else if (record.status === "running" || record.status === "queued") {
     guidance = "Grok is still running. Poll result later or cancel and rerun with a narrower target.";
   } else if (streamError?.code === "max_turns_reached") {
-    guidance = "Grok reached maxTurns before producing a final result. Narrow the target or increase maxTurns before retrying.";
+    guidance = CONTINUE_WITHOUT_TOOLS_REMEDY("Grok reached maxTurns before producing a final result.");
   } else if (record.status === "failed" || streamError) {
     guidance = stderr.trim()
       ? "Grok failed. Inspect the bounded stderr tail and correct the environment or prompt."
       : "Grok failed without stderr. Rerun with a narrower prompt and inspect the structured error.";
   } else if (state === "cancelled_partial") {
-    guidance = "Grok was cancelled. Any returned text is partial and not a final result; continue the session or rerun with a narrower target.";
+    guidance = CONTINUE_WITHOUT_TOOLS_REMEDY(
+      "Grok was cancelled before a final result; any returned text is partial."
+    );
   } else {
     guidance = "Grok exited successfully but did not emit non-empty text with a normal end event.";
   }

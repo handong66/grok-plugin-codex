@@ -23,6 +23,19 @@ All notable user-visible and contract changes to `grok-plugin-codex`.
 
 ### Added
 
+- **GPC-05 — recovery handles on every non-completion.** `grokSessionId` was written only when the caller
+  supplied one, so 88 of 128 recorded jobs never had a resume handle: stdout carries `sessionId` only in the
+  `end` event, which timed-out and killed runs never emit. When the installed CLI advertises
+  `-s, --session-id`, the plugin now generates the session UUID itself, passes it to Grok, and records it
+  **before** the worker starts, so the handle exists from t=0 regardless of how the run dies. CLIs without the
+  flag keep the old behaviour.
+- Every non-complete result carries
+  `recovery = { jobId, grokSessionId, partialTextChars, suggested: { tool: "grok_continue", args: { cwd,
+  sessionId | continueLatest, maxTurns: 1, prompt } } }` — in `error.details` for a foreground failure and in
+  `data.recovery` for `grok_result`. Without a known session id the suggestion degrades to
+  `continueLatest: true` and says in a warning that this is ambiguous, rather than omitting the handle.
+- `error.details.finalTextRef` names the job whose complete captured text is still readable, so an
+  `ok: false` envelope with `data: null` no longer discards an answer that was already paid for.
 - Typed failure diagnostics on worker-recorded errors:
   `error.details = { phase, errorName, errorMessage (≤500 chars), errnoCode, stackTail, teardownError }`,
   plus `timeoutMs` on timeouts. Foreground tools merge them into the error envelope. The free-form fields are
@@ -71,6 +84,12 @@ All notable user-visible and contract changes to `grok-plugin-codex`.
   `foreground_wait_timeout` with `details.jobId`, instead of blocking forever on a wedged worker. The job is
   untouched and can still be read with `grok_status` / `grok_result`.
 
+- Recovery guidance for `max_turns_reached`, `cancelled_output`, and the cancelled-partial state no longer
+  says "narrow the target or increase maxTurns". It now names the recovery that actually worked in the
+  recorded window: continue the same session with `maxTurns: 1` and an explicit no-tools instruction.
+- A vendor-emitted cancelled stop reason is reported as `cancelled_output`; the plain `cancelled` code is now
+  reserved for a job the caller actually cancelled (`cancelRequestedAt` present), and both carry the full
+  diagnostic details that the cancelled branch previously dropped.
 - `npm run smoke:live-grok` is now a **required** release gate rather than an optional one. It remains outside
   `npm test` and `npm run check`: unit tests never call the real API.
 - Error messages and bundled documentation no longer name a single literal stop reason;

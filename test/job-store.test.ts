@@ -84,7 +84,7 @@ describe("Grok job output summary", () => {
     expect(summary.state).toBe("failed_partial");
     expect(summary.streamError?.code).toBe("max_turns_reached");
     expect(summary.grokSessionId).toBe("max-turns-session");
-    expect(summary.guidance).toContain("increase maxTurns");
+    expect(summary.guidance).toContain("do not use any tools");
   });
 
   it("never marks truncated streaming output as complete", () => {

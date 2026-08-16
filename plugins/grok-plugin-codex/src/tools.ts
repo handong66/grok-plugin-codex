@@ -1,3 +1,4 @@
+import { randomUUID } from "node:crypto";
 import { mkdtemp, realpath, rm, stat, writeFile } from "node:fs/promises";
 import { homedir, tmpdir } from "node:os";
 import { basename, dirname, isAbsolute, join, relative, resolve, sep } from "node:path";
@@ -67,6 +68,57 @@ const FOREGROUND_WARN_TIMEOUT_MS = 120_000;
 
 function sleep(ms: number): Promise<void> {
   return new Promise((resolvePromise) => setTimeout(resolvePromise, ms));
+}
+
+/** The continuation prompt that recovered stalled runs in the recorded window. */
+const RECOVERY_PROMPT = "Stop using tools and give the final answer now, under 400 words.";
+
+export type RecoveryHandle = {
+  jobId: string;
+  grokSessionId?: string;
+  partialTextChars: number;
+  suggested: {
+    tool: "grok_continue";
+    args: {
+      cwd: string;
+      sessionId?: string;
+      continueLatest?: true;
+      maxTurns: number;
+      prompt: string;
+    };
+  };
+};
+
+/**
+ * GPC-05: a non-completion used to end with `data: null` and no job id, so the caller could not
+ * reach the text it had already paid for. Every non-complete envelope now carries the handle that
+ * makes a ~10-30s tool-free continuation possible instead of a full rerun.
+ */
+export function buildRecovery(params: {
+  jobId: string;
+  cwd: string;
+  grokSessionId?: string;
+  partialTextChars: number;
+}): { recovery: RecoveryHandle; warnings: string[] } {
+  const warnings: string[] = [];
+  const args: RecoveryHandle["suggested"]["args"] = params.grokSessionId
+    ? { cwd: params.cwd, sessionId: params.grokSessionId, maxTurns: 1, prompt: RECOVERY_PROMPT }
+    : { cwd: params.cwd, continueLatest: true, maxTurns: 1, prompt: RECOVERY_PROMPT };
+  if (!params.grokSessionId) {
+    warnings.push(
+      `No Grok session id is known for job ${params.jobId}; the suggested recovery continues the latest session ` +
+        "in this cwd, which is ambiguous when other Grok runs happened since."
+    );
+  }
+  return {
+    recovery: {
+      jobId: params.jobId,
+      grokSessionId: params.grokSessionId,
+      partialTextChars: params.partialTextChars,
+      suggested: { tool: "grok_continue", args }
+    },
+    warnings
+  };
 }
 
 export function configureWorkspaceRootsProvider(provider: WorkspaceRootsProvider): void {
@@ -176,7 +228,7 @@ function asPluginError(error: unknown): GrokPluginError {
 function failure(error: unknown, warnings: string[] = []) {
   const pluginError = asPluginError(error);
   return toolResult(
-    { ok: false, data: null, error: pluginError.toInfo(), warnings },
+    { ok: false, data: null, error: pluginError.toInfo(), warnings: [...new Set([...pluginError.warnings, ...warnings])] },
     true
   );
 }
@@ -356,13 +408,22 @@ async function runOrStartJob(params: CommonArgs & {
           "Prefer background:true plus grok_status/grok_result for budgets over 120000ms."
       );
     }
+    // GPC-05: stdout carries `sessionId` only inside the `end` event, which the timed-out and killed
+    // runs never emit — 88/128 recorded jobs had no resume handle at all. When the CLI advertises
+    // `--session-id`, the plugin picks the UUID itself and records it before the worker starts, so a
+    // handle exists from t=0 regardless of how the run dies.
+    let assignedSessionId: string | undefined;
+    if (params.kind !== "continue" && capabilities.sessionId) {
+      assignedSessionId = randomUUID();
+      built.args.push("--session-id", assignedSessionId);
+    }
     const job = await store.startGrokJob({
       kind: params.kind,
       cwd,
       args: built.args,
       prompt: params.prompt,
       timeoutMs: effectiveTimeoutMs,
-      grokSessionId: params.sessionId
+      grokSessionId: params.sessionId ?? assignedSessionId
     });
     if (background) {
       return success({ background: true, job: toPublicJob(job) }, built.warnings);
@@ -385,12 +446,25 @@ async function runOrStartJob(params: CommonArgs & {
           : Math.min(Math.round(delay * 1.5), FOREGROUND_POLL_MAX_MS);
     }
     if (!TERMINAL_JOB_STATUSES.has(record.status)) {
+      const waitRecovery = buildRecovery({
+        jobId: job.id,
+        cwd,
+        grokSessionId: record.grokSessionId,
+        partialTextChars: 0
+      });
       throw new GrokPluginError(
         "foreground_wait_timeout",
         "The Grok job outlived its own timeout budget plus the foreground grace period. " +
           "It is still recorded; poll grok_status or grok_result with the returned jobId.",
         true,
-        { jobId: job.id, status: record.status, timeoutMs: effectiveTimeoutMs, graceMs: FOREGROUND_POLL_GRACE_MS }
+        {
+          jobId: job.id,
+          status: record.status,
+          timeoutMs: effectiveTimeoutMs,
+          graceMs: FOREGROUND_POLL_GRACE_MS,
+          finalTextRef: job.id,
+          recovery: waitRecovery.recovery
+        }
       );
     }
     const result = await store.result(job.id);
@@ -399,7 +473,14 @@ async function runOrStartJob(params: CommonArgs & {
       Date.parse(result.record.finishedAt ?? new Date().toISOString()) -
         Date.parse(result.record.startedAt ?? result.record.createdAt)
     );
+    const recovered = buildRecovery({
+      jobId: job.id,
+      cwd,
+      grokSessionId: result.record.grokSessionId ?? result.outputSummary.grokSessionId,
+      partialTextChars: result.outputSummary.finalText?.length ?? 0
+    });
     const summaryWarnings = [...built.warnings, ...result.outputSummary.warnings];
+    const failureWarnings = [...summaryWarnings, ...recovered.warnings];
     const diagnosticDetails = {
       outputState: result.outputSummary.state,
       outputTruncated: result.outputSummary.outputTruncated,
@@ -411,10 +492,25 @@ async function runOrStartJob(params: CommonArgs & {
       textPreview: result.outputSummary.textPreview,
       streamError: result.outputSummary.streamError,
       guidance: result.outputSummary.guidance,
-      stderrTail: result.stderr.slice(-4_000)
+      stderrTail: result.stderr.slice(-4_000),
+      // Never destroy the partial answer: the full text stays reachable through this job id even
+      // though the envelope itself is `ok: false` with `data: null`.
+      finalTextRef: job.id,
+      recovery: recovered.recovery
     };
     if (result.record.status === "cancelled") {
-      throw new GrokPluginError("cancelled", "The Grok request was cancelled before completion.", false);
+      // A vendor-side `cancelled` stop reason is a different failure from an operator cancel, and
+      // only the latter carries `cancelRequestedAt`.
+      const requested = Boolean(result.record.cancelRequestedAt);
+      throw new GrokPluginError(
+        requested ? "cancelled" : "cancelled_output",
+        requested
+          ? "The Grok request was cancelled before completion."
+          : `Grok ended with a cancelled stop reason (${result.outputSummary.stopReason ?? "unknown"}) before producing a final result.`,
+        false,
+        diagnosticDetails,
+        failureWarnings
+      );
     }
     if (result.record.status === "failed") {
       const error = result.record.error ?? {
@@ -422,16 +518,28 @@ async function runOrStartJob(params: CommonArgs & {
         message: grokFailureMessage("grok_failed"),
         retryable: true
       };
-      throw new GrokPluginError(error.code, error.message, error.retryable, {
-        exitCode: result.record.exitCode,
-        ...error.details,
-        ...diagnosticDetails
-      });
+      throw new GrokPluginError(
+        error.code,
+        error.message,
+        error.retryable,
+        {
+          exitCode: result.record.exitCode,
+          ...error.details,
+          ...diagnosticDetails
+        },
+        failureWarnings
+      );
     }
     if (!result.outputSummary.resultComplete) {
       if (result.outputSummary.streamError) {
         const streamError = result.outputSummary.streamError;
-        throw new GrokPluginError(streamError.code, streamError.message, streamError.retryable, diagnosticDetails);
+        throw new GrokPluginError(
+          streamError.code,
+          streamError.message,
+          streamError.retryable,
+          diagnosticDetails,
+          failureWarnings
+        );
       }
       const cancelled = result.outputSummary.state === "cancelled_partial";
       throw new GrokPluginError(
@@ -440,7 +548,8 @@ async function runOrStartJob(params: CommonArgs & {
           ? `Grok ended with a cancelled stop reason (${result.outputSummary.stopReason}) before producing a final result.`
           : "Grok exited without non-empty final text and a normal end event.",
         true,
-        diagnosticDetails
+        diagnosticDetails,
+        failureWarnings
       );
     }
     return success(
@@ -661,6 +770,17 @@ export async function grokStatus(args: { jobId: string }) {
 export async function grokResult(args: { jobId: string; maxChars?: number }) {
   return await guarded(async () => {
     const result = await new JobStore().result(args.jobId, args.maxChars);
+    // Full captured text is returned whatever `resultComplete` says; a partial answer that was
+    // already paid for must never be destroyed by the completeness verdict.
+    const complete = result.outputSummary.resultComplete;
+    const recovered = complete
+      ? undefined
+      : buildRecovery({
+          jobId: result.record.id,
+          cwd: result.record.cwd,
+          grokSessionId: result.record.grokSessionId ?? result.outputSummary.grokSessionId,
+          partialTextChars: result.outputSummary.finalText?.length ?? 0
+        });
     return success(
       {
         job: toPublicJob(result.record),
@@ -668,10 +788,11 @@ export async function grokResult(args: { jobId: string; maxChars?: number }) {
         stderrTail: result.stderr,
         outputSummary: result.outputSummary,
         finalText: result.outputSummary.finalText,
-        resultComplete: result.outputSummary.resultComplete,
-        outputTruncated: result.outputSummary.outputTruncated
+        resultComplete: complete,
+        outputTruncated: result.outputSummary.outputTruncated,
+        ...(recovered ? { recovery: recovered.recovery } : {})
       },
-      result.outputSummary.warnings
+      [...result.outputSummary.warnings, ...(recovered?.warnings ?? [])]
     );
   });
 }

@@ -51,6 +51,7 @@ if [ "$1" = "--help" ]; then
 --no-subagents
 --disable-web-search
 --reasoning-effort <EFFORT>
+  -s, --session-id <SESSION_ID>
 HELP_EOF
   exit 0
 fi

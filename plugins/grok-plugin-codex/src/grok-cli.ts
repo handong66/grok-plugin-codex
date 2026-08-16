@@ -27,6 +27,8 @@ export type GrokCapabilities = {
   noSubagents: boolean;
   disableWebSearch: boolean;
   reasoningEffort: boolean;
+  /** `-s, --session-id <SESSION_ID>`: lets the plugin choose the resume handle before the run starts. */
+  sessionId: boolean;
 };
 
 export type RunProcessOptions = {
@@ -254,7 +256,8 @@ export async function probeGrokCapabilities(
       permissionModePlan: rawHelp.includes("--permission-mode") && rawHelp.includes("plan"),
       noSubagents: rawHelp.includes("--no-subagents"),
       disableWebSearch: rawHelp.includes("--disable-web-search"),
-      reasoningEffort: rawHelp.includes("--reasoning-effort")
+      reasoningEffort: rawHelp.includes("--reasoning-effort"),
+      sessionId: rawHelp.includes("--session-id")
     },
     rawHelp,
     exitCode: result.exitCode
@@ -432,6 +435,20 @@ export function isRetryableGrokFailure(code: string): boolean {
   return ["network_error", "rate_limited", "timeout", "terminated", "max_turns_reached", "grok_failed", "unknown"].includes(code);
 }
 
+/**
+ * One remedy sentence, used by every partial-result code. Continuing the same session with
+ * `maxTurns: 1` and an explicit no-tools instruction is the only recovery observed to turn a
+ * stalled run into a complete answer, and it costs seconds rather than a full rerun.
+ */
+export function CONTINUE_WITHOUT_TOOLS_REMEDY(cause: string): string {
+  return (
+    `${cause} Continue the same session with grok_continue, maxTurns: 1, and a prompt that says ` +
+    "to stop using tools and emit the complete final answer now; do not use any tools. " +
+    "Do not rerun the whole task, and do not raise the budget first — the partial answer is still " +
+    "available from grok_result with the returned jobId."
+  );
+}
+
 export function grokFailureMessage(code: string): string {
   switch (code) {
     case "quota_exhausted":
@@ -451,7 +468,11 @@ export function grokFailureMessage(code: string): string {
     case "unsupported_reasoning_effort":
       return "The selected Grok model does not support reasoning effort. Remove that option or choose a compatible model.";
     case "max_turns_reached":
-      return "Grok reached the configured turn limit before producing a final result. Narrow the target or increase maxTurns before retrying.";
+      // The recovery that actually worked in the recorded window was a one-turn, tool-free
+      // continuation of the same session, not a wider budget or a narrower target.
+      return CONTINUE_WITHOUT_TOOLS_REMEDY(
+        "Grok reached the configured turn limit before producing a final result."
+      );
     case "terminated":
       return "Grok was terminated before producing a final result.";
     default:

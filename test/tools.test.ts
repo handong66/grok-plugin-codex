@@ -143,7 +143,7 @@ printf '%s\n' '{"type":"text","data":"I will review the diff."}' '{"type":"end",
       expect(parsed.error.details.stopReasonRecognised).toBe(true);
       expect(parsed.error.details.grokSessionId).toBe("cancelled-session");
       expect(parsed.error.details.textPreview).toBe("I will review the diff.");
-      expect(parsed.error.details.guidance).toContain("continue the session");
+      expect(parsed.error.details.guidance).toContain("Continue the same session");
     }
   );
 
@@ -212,7 +212,7 @@ exit 1
     expect(parsed.error.details.stopReason).toBe("cancelled");
     expect(parsed.error.details.grokSessionId).toBe("max-turns-session");
     expect(parsed.error.details.stderrTail).toContain("max turns reached");
-    expect(parsed.error.details.guidance).toContain("increase maxTurns");
+    expect(parsed.error.details.guidance).toContain("do not use any tools");
     expect(parsed.error.details.streamError.code).toBe("max_turns_reached");
   });
 

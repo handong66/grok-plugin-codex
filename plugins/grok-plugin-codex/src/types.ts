@@ -9,13 +9,22 @@ export class GrokPluginError extends Error {
   readonly code: string;
   readonly retryable: boolean;
   readonly details?: Record<string, unknown>;
+  /** Non-fatal observations that must survive onto the `ok: false` envelope, never be swallowed. */
+  readonly warnings: string[];
 
-  constructor(code: string, message: string, retryable = false, details?: Record<string, unknown>) {
+  constructor(
+    code: string,
+    message: string,
+    retryable = false,
+    details?: Record<string, unknown>,
+    warnings: string[] = []
+  ) {
     super(message);
     this.name = "GrokPluginError";
     this.code = code;
     this.retryable = retryable;
     this.details = details;
+    this.warnings = warnings;
   }
 
   toInfo(): PluginErrorInfo {
