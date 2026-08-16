@@ -51,6 +51,8 @@ Adding, removing, or renaming a tool or argument must change the source schema a
 - Continuation requires `sessionId` or explicit `continueLatest: true`.
 - Discovery uses trusted `GROK_BIN`; there is no per-call executable path.
 - Required safety flags are capability-probed from the installed `grok --help` and fail closed when absent.
+- `missingRunCapabilities` is that gate and has one caller list: every path that starts a real Grok process, including
+  the opt-in `grok_check` invocation probe. A CLI missing the read-only flags gets `cli_incompatible`, never a live call.
 - Process-tree lifecycle is supported on macOS and Linux; package metadata and runtime checks reject other platforms.
 
 ## Background finality

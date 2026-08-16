@@ -252,6 +252,24 @@ export function buildContinueArgs(
   return built;
 }
 
+/**
+ * The one fail-closed capability list. Every path that starts a real Grok process consults it —
+ * including `grok_check`'s invocation probe, which runs in the read-only shape and would otherwise
+ * spend quota on a CLI that no longer understands `--permission-mode plan`.
+ */
+function missingRunCapabilities(
+  capabilities: GrokCapabilities,
+  options: { readOnly: boolean; disableWebSearch?: boolean }
+): string[] {
+  return [
+    !capabilities.promptFile ? "--prompt-file" : "",
+    !capabilities.streamingJson ? "streaming-json" : "",
+    options.readOnly && !capabilities.permissionModePlan ? "--permission-mode plan" : "",
+    options.readOnly && !capabilities.noSubagents ? "--no-subagents" : "",
+    options.disableWebSearch && !capabilities.disableWebSearch ? "--disable-web-search" : ""
+  ].filter(Boolean);
+}
+
 async function requiredRunCapabilities(params: CommonArgs & { readOnly: boolean }): Promise<GrokCapabilities> {
   const discovered = await discoverGrok();
   if (!discovered.ok || !discovered.bin) {
@@ -260,13 +278,10 @@ async function requiredRunCapabilities(params: CommonArgs & { readOnly: boolean 
     });
   }
   const probe = await probeGrokCapabilities(discovered.bin);
-  const missing = [
-    !probe.capabilities.promptFile ? "--prompt-file" : "",
-    !probe.capabilities.streamingJson ? "streaming-json" : "",
-    params.readOnly && !probe.capabilities.permissionModePlan ? "--permission-mode plan" : "",
-    params.readOnly && !probe.capabilities.noSubagents ? "--no-subagents" : "",
-    params.disableWebSearch && !probe.capabilities.disableWebSearch ? "--disable-web-search" : ""
-  ].filter(Boolean);
+  const missing = missingRunCapabilities(probe.capabilities, {
+    readOnly: params.readOnly,
+    disableWebSearch: params.disableWebSearch
+  });
   if (probe.exitCode !== 0 || missing.length) {
     throw new GrokPluginError("cli_incompatible", "The installed Grok CLI lacks required safe execution capabilities.", false, {
       missing
@@ -441,6 +456,19 @@ export async function grokCheck(args: {
     const warnings: string[] = [];
     let invocation: GrokInvocationProbe | undefined;
     if (args.probeInvocation) {
+      // The probe is a real, quota-spending Grok call in the read-only shape, so it goes through the
+      // same fail-closed gate as a review run. Without this, a CLI that dropped `--permission-mode`
+      // would either run the probe unconstrained or report `callable: false` for a compatibility
+      // problem the caller can act on.
+      const missing = missingRunCapabilities(probe.capabilities, { readOnly: true });
+      if (missing.length) {
+        throw new GrokPluginError(
+          "cli_incompatible",
+          "The installed Grok CLI lacks the read-only capabilities required to run the invocation probe.",
+          false,
+          { ...base, missing }
+        );
+      }
       invocation = await runInvocationProbe(discovered.bin, cwd, args.model, args.timeoutMs);
       if (!invocation.callable && invocation.failureReason) warnings.push(invocation.failureReason);
     }

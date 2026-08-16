@@ -307,6 +307,36 @@ printf '%s\n' '{"type":"text","data":"OK"}' '{"type":"end","stopReason":"cancell
     expect(parsed.warnings.join(" ")).toContain("normal end turn");
   });
 
+  it("grok_check refuses to spend quota on an invocation probe a CLI cannot run read-only", async () => {
+    const dir = await tempDir();
+    const argsFile = join(dir, "unreachable-probe-argv.log");
+    // A Grok build that dropped `--permission-mode`: probing it would be an unconstrained live call.
+    const grokBin = await makeExecutable(
+      join(dir, "grok"),
+      `#!/bin/sh
+if [ "$1" = "--version" ]; then echo "grok fake 1.1.0"; exit 0; fi
+if [ "$1" = "--help" ]; then
+  echo "--prompt-file --output-format streaming-json --no-subagents --disable-web-search"
+  exit 0
+fi
+printf '%s\n' "$@" > ${JSON.stringify(argsFile)}
+printf '%s\n' '{"type":"text","data":"OK"}' '{"type":"end","stopReason":"end_turn","sessionId":"probe"}'
+`
+    );
+
+    const result = await withEnv({ GROK_BIN: grokBin }, () =>
+      grokCheck({ cwd: dir, includeModels: false, ...roots(dir), probeInvocation: true })
+    );
+    const parsed = envelope(result);
+
+    expect(parsed.ok).toBe(false);
+    expect(parsed.error.code).toBe("cli_incompatible");
+    expect(parsed.error.retryable).toBe(false);
+    expect(parsed.error.details.missing).toEqual(["--permission-mode plan"]);
+    expect(parsed.error.details.capabilities.permissionModePlan).toBe(false);
+    await expect(access(argsFile)).rejects.toMatchObject({ code: "ENOENT" });
+  });
+
   it("grok_run sends prompt text through a private file descriptor instead of argv or retained state", async () => {
     const dir = await tempDir();
     const argsFile = join(dir, "argv.log");

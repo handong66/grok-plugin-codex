@@ -108,7 +108,8 @@ server.registerTool(
         .optional()
         .describe(
           "Opt-in only, default false. Spends real Grok quota on one bounded call (--max-turns 1, 30s cap) to prove " +
-            "the model answers and the stream still ends with a normal end turn. Never enable it for routine checks."
+            "the model answers and the stream still ends with a normal end turn. Never enable it for routine checks. " +
+            "Fails closed with cli_incompatible, without calling Grok, when the installed CLI lacks the read-only flags."
         )
     },
     outputSchema

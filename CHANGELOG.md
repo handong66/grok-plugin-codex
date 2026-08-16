@@ -44,6 +44,9 @@ All notable user-visible and contract changes to `grok-plugin-codex`.
   one bounded live call (`--permission-mode plan --no-subagents --max-turns 1`, 30s cap, fixed prompt delivered
   through a private `0600` prompt file) and reports `modelInvocationTested`, `callable`, `observedStopReason`,
   `observedStopReasonNormalized`, and `observedEventTypes`. It spends real quota, so it must stay opt-in.
+  The probe passes through the same fail-closed capability gate as a read-only run: if the installed CLI does not
+  advertise `--prompt-file`, `streaming-json`, `--permission-mode plan`, and `--no-subagents`, `grok_check` returns
+  `cli_incompatible` with the missing flags and makes no live call at all.
 
 ### Changed
 
