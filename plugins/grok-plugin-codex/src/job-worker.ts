@@ -15,7 +15,7 @@ import {
   signalPidTree,
   signalProcessTree
 } from "./grok-cli.js";
-import { JobStore, STREAM_SUMMARY_VERSION } from "./job-store.js";
+import { JobStore, MAX_FINAL_TEXT_LEDGER_CHARS, STREAM_SUMMARY_VERSION } from "./job-store.js";
 import { exemptWorkspacePaths, type PathRedactor } from "./redact.js";
 import {
   createStreamFacts,
@@ -33,8 +33,9 @@ import { StreamCapture, type CaptureWrite } from "./stream-capture.js";
 import type { JobRecord } from "./types.js";
 
 const MAX_CAPTURE_CHARS = 1_000_000;
-/** The answer ledger is append-only, so it carries its own ceiling; past it, result() re-parses. */
-const MAX_FINAL_TEXT_LEDGER_CHARS = 4_000_000;
+// The answer ledger is append-only, so it carries its own ceiling; past it, result() re-parses. The
+// ceiling lives in job-store.ts (X12) because the read that serves the file back must use the same
+// number — a smaller read is a silent decapitation of the answer.
 const MAX_ERROR_MESSAGE_CHARS = 500;
 const MAX_STACK_TAIL_CHARS = 1_000;
 /**

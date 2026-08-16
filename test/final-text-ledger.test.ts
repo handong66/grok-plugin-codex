@@ -2,7 +2,7 @@ import { randomUUID } from "node:crypto";
 import { mkdir, readFile, stat, writeFile } from "node:fs/promises";
 import { join } from "node:path";
 import { describe, expect, it } from "vitest";
-import { JobStore } from "../plugins/grok-plugin-codex/src/job-store.js";
+import { JobStore, MAX_FINAL_TEXT_LEDGER_CHARS } from "../plugins/grok-plugin-codex/src/job-store.js";
 import { runJobWorker } from "../plugins/grok-plugin-codex/src/job-worker.js";
 import type { JobRecord } from "../plugins/grok-plugin-codex/src/types.js";
 import { makeExecutable, tempDir } from "./helpers.js";
@@ -88,6 +88,33 @@ describe("GPC-03b final-text ledger", () => {
     expect(result.outputSummary.finalText).toBe("first second");
     expect(result.outputSummary.resultComplete).toBe(true);
   });
+
+  /**
+   * X12 / FINAL Review M4. The worker appends up to MAX_FINAL_TEXT_LEDGER_CHARS (4M); the read that
+   * served the file back asked for a 1M *tail*, so an answer between the two ceilings came back with
+   * its opening removed — and `grok_result`'s `finalTextOffset` paging then described the beheaded
+   * window, not the answer. Nothing flagged it: `sawEnd` and `stopReason` still said `end_turn`.
+   */
+  it("returns a ledger larger than 1MB whole, not its last megabyte", async () => {
+    const { store, jobId } = await startJob();
+    const head = "HEAD-OF-ANSWER";
+    const tail = "TAIL-OF-ANSWER";
+    const answer = head + "x".repeat(1_500_000 - head.length - tail.length) + tail;
+
+    await writeFile(store.finalTextPath(jobId), answer, { mode: 0o600 });
+    const summary = JSON.parse(await readFile(store.summaryPath(jobId), "utf8"));
+    await writeFile(
+      store.summaryPath(jobId),
+      JSON.stringify({ ...summary, textChars: answer.length }),
+      { mode: 0o600 }
+    );
+    const facts = await store.readStreamFacts(jobId);
+
+    expect(facts?.finalText).toHaveLength(answer.length);
+    expect(facts?.finalText.startsWith(head)).toBe(true);
+    expect(facts?.finalText.endsWith(tail)).toBe(true);
+    expect(MAX_FINAL_TEXT_LEDGER_CHARS).toBe(4_000_000);
+  }, 30_000);
 
   it("accepts a pre-marker state directory that already holds ledger artifacts", async () => {
     const stateDir = await tempDir();

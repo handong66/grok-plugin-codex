@@ -39,6 +39,14 @@ const STALE_CONFIRM_DELAY_MS = 1_000;
 const MAX_RESULT_CHARS = 100_000;
 const WORKER_LOG_TAIL_CHARS = 4_000;
 const SUMMARY_READ_CHARS = 1_000_000;
+/**
+ * X12 / FINAL Review M4: the ceiling the worker enforces when it appends to `<id>.final.txt`, and
+ * therefore the only correct size for the read that serves that file back. It used to be read with
+ * `SUMMARY_READ_CHARS` — a 1MB *tail* — so an answer between 1MB and the worker's 4MB cap came back
+ * with its opening silently removed, and `grok_result`'s `finalTextOffset` paging then described the
+ * beheaded window rather than the answer. The worker imports this constant so the two cannot drift.
+ */
+export const MAX_FINAL_TEXT_LEDGER_CHARS = 4_000_000;
 const TERMINAL_RETENTION_MS = 7 * 24 * 60 * 60 * 1_000;
 const JOB_LOCK_STALE_MS = 2_000;
 const JOB_LOCK_WAIT_MS = 5_000;
@@ -840,7 +848,8 @@ export class JobStore {
   async readStreamFacts(jobId: string): Promise<StreamFacts | undefined> {
     const summary = await this.readStreamProgress(jobId);
     if (!summary) return undefined;
-    const finalText = await readTail(this.finalTextPath(jobId), SUMMARY_READ_CHARS);
+    // X12: read the whole ledger, not a 1MB tail of it — the worker's own cap is the bound.
+    const finalText = await readTail(this.finalTextPath(jobId), MAX_FINAL_TEXT_LEDGER_CHARS);
     return {
       ...summary,
       finalText,
