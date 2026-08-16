@@ -39,9 +39,10 @@ function deniedShellStream(): string {
 
 describe("GPC-06 read-only shell notice", () => {
   test("every read-only prompt states that shell execution is unavailable", () => {
-    const preamble = buildReadOnlyPreamble();
+    const preamble = buildReadOnlyPreamble({ kind: "review", timeoutMs: 240_000 }).join("\n");
 
     expect(preamble).toContain(HEADLESS_PREAMBLE);
+    expect(preamble).toContain("240 seconds");
     expect(preamble).toContain(READ_ONLY_SHELL_NOTICE);
     expect(READ_ONLY_SHELL_NOTICE).toContain("Shell/terminal execution is disabled in this session");
     expect(READ_ONLY_SHELL_NOTICE).toContain("Do not call run_terminal_command");

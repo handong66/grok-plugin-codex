@@ -71,7 +71,19 @@ const outputSchema = {
 
 const cwdRequired = z.string().trim().min(1).max(4_096).describe("Existing working directory inside an active MCP workspace root.");
 const cwdOptional = z.string().trim().min(1).max(4_096).optional();
-const timeoutSchema = z.number().int().positive().max(86_400_000).optional();
+const timeoutSchema = z
+  .number()
+  .int()
+  .positive()
+  .max(86_400_000)
+  .optional()
+  .describe(
+    "Wall-clock budget. Omitted, it defaults per kind: run/continue 180000, review 240000, " +
+      "adversarial_review/rescue 300000/240000. An explicit value is never clamped in either direction; " +
+      "below 30000 the call returns a warning quoting the observed cost of a successful run " +
+      "(median 31s, p90 111s, max 402s). The effective value comes back as data.effectiveTimeoutMs and " +
+      "is stated to Grok inside plugin-built prompts."
+  );
 const jobIdSchema = z.string().min(20).max(132).regex(/^job_[A-Za-z0-9_-]+$/);
 
 const backgroundSchema = z
@@ -80,7 +92,8 @@ const backgroundSchema = z
   .describe(
     "Default true for grok_run/grok_review/grok_adversarial_review/grok_rescue and false for grok_continue. " +
       "true returns data.job.id immediately; poll grok_status, then call grok_result once. " +
-      "false blocks this MCP call until the job is terminal, for up to timeoutMs (default 600000ms) plus a 10s grace."
+      "false blocks this MCP call until the job is terminal, for up to timeoutMs (per-kind default, see " +
+      "timeoutMs) plus a 10s grace."
   );
 
 const executionShape = {
@@ -89,7 +102,18 @@ const executionShape = {
   timeoutMs: timeoutSchema,
   background: backgroundSchema,
   disableWebSearch: z.boolean().optional(),
-  maxTurns: z.number().int().positive().max(10_000).optional(),
+  maxTurns: z
+    .number()
+    .int()
+    .positive()
+    .max(10_000)
+    .optional()
+    .describe(
+      "Tool-using turn limit. There is no default and no floor: maxTurns 1-2 is a deliberate " +
+        "answer-immediately technique and 21 of 26 such recorded runs succeeded. When set, plugin-built " +
+        "prompts tell Grok the limit and to emit a complete answer on its final turn; the effective value " +
+        "comes back as data.effectiveMaxTurns."
+    ),
   reasoningEffort: z.string().trim().min(1).max(128).optional(),
   allowCodexPrivatePaths: z.boolean().optional()
 };

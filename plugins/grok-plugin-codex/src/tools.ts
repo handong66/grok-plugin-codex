@@ -43,7 +43,76 @@ type WorkspaceRootsProvider = () => Promise<string[]>;
 let workspaceRootsProvider: WorkspaceRootsProvider = async () => [process.cwd()];
 
 const COMPOSER_FAST_MODEL = "grok-composer-2.5-fast";
-const DEFAULT_RUN_TIMEOUT_MS = 600_000;
+/**
+ * GPC-08 + SPEC §D M3 + GK3. The single 600s default was rejected on the grounds that only 1 of 128
+ * recorded jobs used it, but that sample is one week of persisted jobs; across the whole window the
+ * default was reached by 466 of 655 execution calls (71%). These are the per-kind budgets from
+ * GPC-12, applied **only when the caller omitted `timeoutMs`** — an explicit value is never clamped
+ * in either direction, because maxTurns/timeout values as small as 1-2 turns are a deliberate
+ * "answer immediately" technique in the recorded window.
+ */
+export const DEFAULT_TIMEOUT_MS_BY_KIND: Record<JobKind, number> = {
+  run: 180_000,
+  continue: 180_000,
+  review: 240_000,
+  // No published p90 exists for grok rescue; it is shaped like a review, so it inherits that budget.
+  rescue: 240_000,
+  adversarial_review: 300_000
+};
+
+export function effectiveTimeoutMs(kind: JobKind, timeoutMs?: number): number {
+  return timeoutMs ?? DEFAULT_TIMEOUT_MS_BY_KIND[kind];
+}
+
+/** Successful runs in the recorded window: median 31s, p90 111s, max 402s. */
+const LOW_BUDGET_WARN_MS = 30_000;
+const VERY_LOW_BUDGET_WARN_MS = 15_000;
+/** Above this the target is large enough that a multi-turn exploration is unlikely to converge. */
+const LARGE_TARGET_CHARS = 8_000;
+
+/**
+ * GPC-08: a turn limit with no answer is worse than a shorter answer. The only mechanism that turns
+ * one into the other is telling the delegate what its budget is and what to do on the last turn.
+ */
+export function budgetNotice(options: { maxTurns?: number; timeoutMs: number }): string[] {
+  const lines: string[] = [];
+  if (options.maxTurns !== undefined) {
+    lines.push(
+      `You have at most ${options.maxTurns} tool-using turns. On your final turn you must stop calling ` +
+        "tools and output the complete answer, even if evidence is incomplete — say explicitly what you " +
+        "could not inspect."
+    );
+  }
+  lines.push(
+    `You have at most ${Math.round(options.timeoutMs / 1_000)} seconds of wall-clock time. Before that ` +
+      "budget runs out, stop calling tools and output the complete answer, even if evidence is " +
+      "incomplete — say explicitly what you could not inspect."
+  );
+  return lines;
+}
+
+/** Warn-only, never clamp: the plugin says what the data shows and runs what the caller asked for. */
+function budgetWarnings(params: { timeoutMs?: number; maxTurns?: number; promptChars: number }): string[] {
+  const warnings: string[] = [];
+  if (params.timeoutMs !== undefined && params.timeoutMs < LOW_BUDGET_WARN_MS) {
+    warnings.push(
+      `timeoutMs=${params.timeoutMs} is below the observed cost of a successful Grok run on this ` +
+        "machine (median 31s, p90 111s, max 402s)" +
+        (params.timeoutMs < VERY_LOW_BUDGET_WARN_MS
+          ? "; a recorded run with timeoutMs=1000 died in 1.0s with zero output"
+          : "") +
+        ". The value is not clamped — it runs as given."
+    );
+  }
+  if (params.maxTurns !== undefined && params.maxTurns >= 3 && params.promptChars > LARGE_TARGET_CHARS) {
+    warnings.push(
+      `maxTurns=${params.maxTurns} with a ${params.promptChars}-character target invites exploration that ` +
+        "the budget cannot finish; recorded successes cluster at median 31s / p90 111s. Either inline less " +
+        "and ask a narrower question, or expect to recover with a one-turn tool-free continuation."
+    );
+  }
+  return warnings;
+}
 const DEFAULT_DISCOVERY_TIMEOUT_MS = 30_000;
 const TERMINAL_JOB_STATUSES = new Set(["succeeded", "failed", "cancelled"]);
 /** Foreground wait loop pacing; see GPC-09. */
@@ -52,8 +121,8 @@ const FOREGROUND_POLL_MAX_MS = 2_000;
 const FOREGROUND_POLL_GRACE_MS = 10_000;
 
 /**
- * GPC-M1: `background` had no default, so an omitted flag meant "block the MCP client for up to
- * DEFAULT_RUN_TIMEOUT_MS". 65% of observed execution calls omitted it, which is the mechanism behind
+ * GPC-M1: `background` had no default, so an omitted flag meant "block the MCP client for up to the
+ * whole run budget". 65% of observed execution calls omitted it, which is the mechanism behind
  * "the dispatched task never came back". Dispatch kinds now default to background; only `continue`
  * — the short finish-the-answer call — stays in the foreground.
  */
@@ -467,11 +536,14 @@ async function runOrStartJob(params: CommonArgs & {
         ? buildContinueArgs({ ...params, cwd, capabilities, readOnly })
         : buildRunArgs({ ...params, cwd, capabilities, readOnly });
     built.warnings.unshift(...inheritedWarnings);
-    const effectiveTimeoutMs = params.timeoutMs ?? DEFAULT_RUN_TIMEOUT_MS;
+    const timeoutMs = effectiveTimeoutMs(params.kind, params.timeoutMs);
+    built.warnings.push(
+      ...budgetWarnings({ timeoutMs: params.timeoutMs, maxTurns: params.maxTurns, promptChars: params.prompt.length })
+    );
     const background = params.background ?? BACKGROUND_DEFAULT_BY_KIND[params.kind];
-    if (!background && effectiveTimeoutMs > FOREGROUND_WARN_TIMEOUT_MS) {
+    if (!background && timeoutMs > FOREGROUND_WARN_TIMEOUT_MS) {
       built.warnings.push(
-        `background:false blocks the MCP client for up to timeoutMs=${effectiveTimeoutMs}ms. ` +
+        `background:false blocks the MCP client for up to timeoutMs=${timeoutMs}ms. ` +
           "Prefer background:true plus grok_status/grok_result for budgets over 120000ms."
       );
     }
@@ -489,12 +561,13 @@ async function runOrStartJob(params: CommonArgs & {
       cwd,
       args: built.args,
       prompt: params.prompt,
-      timeoutMs: effectiveTimeoutMs,
+      timeoutMs,
       grokSessionId: params.sessionId ?? assignedSessionId,
       readOnly
     });
+    const budgetEcho = { effectiveTimeoutMs: timeoutMs, effectiveMaxTurns: params.maxTurns };
     if (background) {
-      return success({ background: true, job: toPublicJob(job) }, built.warnings);
+      return success({ background: true, ...budgetEcho, job: toPublicJob(job) }, built.warnings);
     }
 
     // GPC-09: the previous loop called `store.result()` every 50ms. Each call re-read up to 4MB of
@@ -503,7 +576,7 @@ async function runOrStartJob(params: CommonArgs & {
     // the loop polls that with backoff and parses the stream exactly once, after the job is terminal.
     let record = await store.status(job.id);
     let delay = FOREGROUND_POLL_START_MS;
-    const waitDeadline = Date.now() + effectiveTimeoutMs + FOREGROUND_POLL_GRACE_MS;
+    const waitDeadline = Date.now() + timeoutMs + FOREGROUND_POLL_GRACE_MS;
     while (!TERMINAL_JOB_STATUSES.has(record.status) && Date.now() < waitDeadline) {
       const previousStatus = record.status;
       await sleep(delay);
@@ -528,7 +601,8 @@ async function runOrStartJob(params: CommonArgs & {
         {
           jobId: job.id,
           status: record.status,
-          timeoutMs: effectiveTimeoutMs,
+          timeoutMs,
+          ...budgetEcho,
           graceMs: FOREGROUND_POLL_GRACE_MS,
           finalTextRef: job.id,
           recovery: waitRecovery.recovery
@@ -550,6 +624,7 @@ async function runOrStartJob(params: CommonArgs & {
     const summaryWarnings = [...built.warnings, ...result.outputSummary.warnings];
     const failureWarnings = [...summaryWarnings, ...recovered.warnings];
     const diagnosticDetails = {
+      ...budgetEcho,
       outputState: result.outputSummary.state,
       outputTruncated: result.outputSummary.outputTruncated,
       stopReason: result.outputSummary.stopReason,
@@ -663,6 +738,7 @@ async function runOrStartJob(params: CommonArgs & {
     return success(
       {
         background: false,
+        ...budgetEcho,
         exitCode: result.record.exitCode,
         durationMs,
         finalText: result.outputSummary.finalText,
@@ -828,14 +904,21 @@ export const READ_ONLY_SHELL_NOTICE =
   "state exactly which command output you need inlined and stop — do not guess, and do not report FAIL " +
   "for evidence you were never given.";
 
-/** The two sentences every enforced read-only prompt opens with. */
-export function buildReadOnlyPreamble(): string[] {
-  return [HEADLESS_PREAMBLE, READ_ONLY_SHELL_NOTICE];
+/** The sentences every enforced read-only prompt opens with, including its budget (GPC-08). */
+export function buildReadOnlyPreamble(options: { kind: JobKind; maxTurns?: number; timeoutMs?: number }): string[] {
+  return [
+    HEADLESS_PREAMBLE,
+    READ_ONLY_SHELL_NOTICE,
+    ...budgetNotice({
+      maxTurns: options.maxTurns,
+      timeoutMs: effectiveTimeoutMs(options.kind, options.timeoutMs)
+    })
+  ];
 }
 
 export async function grokRescue(args: CommonArgs & { problem: string }) {
   const prompt = [
-    ...buildReadOnlyPreamble(),
+    ...buildReadOnlyPreamble({ kind: "rescue", maxTurns: args.maxTurns, timeoutMs: args.timeoutMs }),
     "You are Grok acting as an independent rescue reviewer for a Codex task.",
     "Stay read-only. Do not edit files, commit, push, deploy, or run destructive commands.",
     "Do not read Codex private runtime directories.",
@@ -848,7 +931,7 @@ export async function grokRescue(args: CommonArgs & { problem: string }) {
 
 export async function grokReview(args: CommonArgs & { target: string }) {
   const prompt = [
-    ...buildReadOnlyPreamble(),
+    ...buildReadOnlyPreamble({ kind: "review", maxTurns: args.maxTurns, timeoutMs: args.timeoutMs }),
     "You are Grok acting as a bounded second reviewer for Codex.",
     `Review only this explicit target: ${args.target}`,
     "Stay read-only. Do not edit files, commit, push, deploy, or run destructive commands.",
@@ -862,7 +945,7 @@ export async function grokReview(args: CommonArgs & { target: string }) {
 
 export async function grokAdversarialReview(args: CommonArgs & { target: string }) {
   const prompt = [
-    ...buildReadOnlyPreamble(),
+    ...buildReadOnlyPreamble({ kind: "adversarial_review", maxTurns: args.maxTurns, timeoutMs: args.timeoutMs }),
     "You are Grok acting as a bounded failure-mode reviewer for Codex.",
     `Inspect only this explicit target: ${args.target}`,
     "Stay read-only. Do not edit files, commit, push, deploy, or run destructive commands.",

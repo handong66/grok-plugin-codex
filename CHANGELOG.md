@@ -72,6 +72,20 @@ All notable user-visible and contract changes to `grok-plugin-codex`.
 
 ### Added
 
+- **GPC-08 / GK3 / SPEC §D M3 — the budget is now stated to the delegate, and defaults per kind.**
+  A turn or wall-clock limit with no answer used to be a total loss; plugin-built prompts
+  (`grok_review`, `grok_adversarial_review`, `grok_rescue`) now tell Grok its turn budget and its
+  wall-clock budget, and instruct it to stop calling tools and emit a complete answer — naming what it
+  could not inspect — before the budget runs out. Every envelope echoes **`effectiveTimeoutMs`** and
+  **`effectiveMaxTurns`**. **Omitted `timeoutMs` now defaults per kind** (run/continue `180000`,
+  review/rescue `240000`, adversarial_review `300000`) instead of a single `600000`: the original
+  rejection rested on a one-week sample of persisted jobs, while across the whole window 466 of 655
+  execution calls (71 %) reached the default. **Explicit values are never clamped, in either
+  direction**, and there is no `maxTurns` floor — `maxTurns` 1-2 is a deliberate answer-immediately
+  technique with 21 of 26 recorded successes. Two warn-only checks were added: `timeoutMs` under
+  `30000` quotes the observed cost of a success (median 31 s, p90 111 s, max 402 s), and `maxTurns >= 3`
+  with a target over 8 000 characters warns that the exploration is unlikely to converge.
+
 - **GPC-03b — final-text ledger and a result path that does not re-parse.** `JobStore.result()` read
   up to 4 MB of raw stream and re-parsed up to 1 M characters on every call, 656 times in the recorded
   window, to rebuild the 3.31 % of the stream that is answer text. The worker now records the answer
