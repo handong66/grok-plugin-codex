@@ -12,8 +12,8 @@ describe("published contract drift", () => {
     const server = await text("plugins/grok-plugin-codex/src/server.ts");
     const dist = await text("plugins/grok-plugin-codex/dist/server.js");
 
-    expect(packageJson.version).toBe("0.2.1");
-    expect(manifest.version).toMatch(/^0\.2\.1(?:\+codex\.[0-9A-Za-z.-]+)?$/);
+    expect(packageJson.version).toBe("0.3.0");
+    expect(manifest.version).toMatch(/^0\.3\.0(?:\+codex\.[0-9A-Za-z.-]+)?$/);
     expect(manifest.version.split("+")[0]).toBe(packageJson.version);
     // GPC-10.2: the version is injected at build time, so the source must carry no literal and the
     // built bundle must carry exactly the package version.

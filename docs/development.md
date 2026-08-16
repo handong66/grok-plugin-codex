@@ -35,7 +35,11 @@ npm run smoke:live-grok
 - `src/tools.ts` owns workspace validation, command construction, envelopes, and foreground polling behavior.
 - `src/job-store.ts` owns private state, owner-checked locks, atomic/monotonic persistence, process-group ownership verification, cancellation markers, cleanup, and public-job sanitization.
 - `src/job-worker.ts` owns foreground/background CLI process lifetime, heartbeat, timeout, tree termination, logs, prompt handoff/cleanup, and terminal classification.
-- `src/result-parser.ts` owns streaming finality.
+- `src/result-parser.ts` owns streaming finality, and the single per-line stream observer
+  (`observeStreamLine`) that both the worker's incremental ledger and the fallback re-parse use. A new
+  stream fact must be added there once, never in two places.
+- `src/version.ts` owns the published version: `scripts/build.mjs` defines it from package.json, so no
+  source file may carry a version literal (`validate:plugin` and `contract-drift` both check this).
 - `scripts/smoke-mcp.mjs` and `test/contract-drift.test.ts` lock the published contract.
 - Bundled README and skill files explain the installed contract; the root README is developer and release documentation.
 
@@ -59,6 +63,23 @@ Adding, removing, or renaming a tool or argument must change the source schema a
 - `missingRunCapabilities` is that gate and has one caller list: every path that starts a real Grok process, including
   the opt-in `grok_check` invocation probe. A CLI missing the read-only flags gets `cli_incompatible`, never a live call.
 - Process-tree lifecycle is supported on macOS and Linux; package metadata and runtime checks reject other platforms.
+
+## Budgets and the answer ledger
+
+- `timeoutMs` defaults per kind (`DEFAULT_TIMEOUT_MS_BY_KIND`: run/continue 180s, review/rescue 240s,
+  adversarial_review 300s) and is never clamped when the caller gives one, in either direction. There is
+  no `maxTurns` default and no floor: `maxTurns` 1-2 is a deliberate answer-immediately technique.
+  Budget problems are warnings, never rejections, and both effective values are echoed on every envelope.
+- Plugin-built prompts state the budget to the delegate (`budgetNotice`) and, for read-only kinds, that
+  shell execution is unavailable (`READ_ONLY_SHELL_NOTICE`). A prompt change here is a contract change:
+  the SKILL and both READMEs must not contradict it.
+- The worker writes `<id>.final.txt` (append-only answer text) and `<id>.summary.json` (stream facts)
+  as the stream arrives. `JobStore.result()` reads that ledger; `grok_status` reads the summary alone
+  for progress. Any new per-job artifact must be added to **both** the strict pre-marker layout
+  allowlist and `cleanupExpiredJobs`, or `ensure()` will reject a real state directory.
+- `JobStore.status()` is destructive: it reaps a job whose heartbeat is stale. The threshold is 10s, a
+  stale reading must be confirmed a second time, and observed ledger progress vetoes the reap. Any
+  change here must keep all three, and the `grok_status` description must keep saying the tool can reap.
 
 ## Background finality
 

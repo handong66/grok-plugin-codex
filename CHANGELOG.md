@@ -2,7 +2,16 @@
 
 All notable user-visible and contract changes to `grok-plugin-codex`.
 
-## Unreleased → 0.3.0
+## 0.3.0 — 2026-08-16
+
+Contract changes in this release: `background` defaults to `true` for dispatch tools; `timeoutMs`
+defaults per kind instead of `600000`; `grok_result` omits raw log tails unless `includeRawTail: true`;
+`grok_review` / `grok_adversarial_review` / `grok_rescue` require `cwd` only, with the target passed as
+`target`/`problem` or the sibling spelling `prompt`; `grok_check` reports `authenticated` / `entitled`
+as `true` / `false` / `"unknown"` rather than `null`; new tool `grok_finalize`; new codes
+`quota_free_tier`, `no_evidence_review`, `permission_denied_headless`, `readonly_session_escalation`,
+`foreground_wait_timeout`, `model_tool_incompatible`, `target_required`, `finalize_target_unknown`;
+`workspace_unavailable` is now retryable.
 
 ### Fixed
 

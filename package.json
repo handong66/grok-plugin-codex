@@ -1,6 +1,6 @@
 {
   "name": "grok-plugin-codex",
-  "version": "0.2.1",
+  "version": "0.3.0",
   "description": "Codex MCP capability adapter for safe Grok CLI runs, sessions, reviews, and restart-safe background jobs.",
   "type": "module",
   "private": false,
