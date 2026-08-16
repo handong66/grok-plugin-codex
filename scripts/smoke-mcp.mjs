@@ -108,6 +108,7 @@ const expectedSchemas = {
       "prompt",
       "reasoningEffort",
       "target",
+      "threatModel",
       "timeoutMs"
     ],
     required: ["cwd"]

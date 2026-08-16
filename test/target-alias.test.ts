@@ -114,3 +114,33 @@ describe("GK9(b) target block", () => {
     expect(prompt).toContain("Target:\nReview the current working tree diff");
   });
 });
+
+describe("X3 threat model", () => {
+  it("states the caller's scope and forbids out-of-model findings from blocking", async () => {
+    const { workspace, promptCopy, env, common } = await setup();
+
+    await withEnv(env, () =>
+      grokAdversarialReview({
+        cwd: workspace,
+        ...common,
+        target: "src/tools.ts",
+        threatModel: "single-user local application; no network exposure"
+      })
+    );
+    const prompt = await readFile(promptCopy, "utf8");
+
+    expect(prompt).toContain("single-user local application; no network exposure");
+    expect(prompt).toContain("out-of-model");
+    expect(prompt).toContain("must never be a blocker");
+    // Neutral engineering vocabulary only: the recorded run was cut off by a cybersecurity filter.
+    expect(prompt).not.toMatch(/attacker|malicious|attack chain/i);
+  });
+
+  it("says the scope was not given rather than inventing one", async () => {
+    const { workspace, promptCopy, env, common } = await setup();
+
+    await withEnv(env, () => grokAdversarialReview({ cwd: workspace, ...common, target: "src/tools.ts" }));
+
+    expect(await readFile(promptCopy, "utf8")).toContain("Not specified by the caller");
+  });
+});

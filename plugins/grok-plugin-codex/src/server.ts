@@ -284,7 +284,18 @@ server.registerTool(
     inputSchema: {
       ...executionShape,
       target: targetLike.optional().describe(`The explicit review target. ${aliasNote}`),
-      prompt: targetLike.optional().describe("Alias for target, accepted for sibling-plugin compatibility.")
+      prompt: targetLike.optional().describe("Alias for target, accepted for sibling-plugin compatibility."),
+      threatModel: z
+        .string()
+        .trim()
+        .min(1)
+        .max(2_048)
+        .optional()
+        .describe(
+          "The operating scope this review must judge against, e.g. \"single-user local application; no " +
+            "network exposure\". Findings outside it are labelled out-of-model and are advisory only — " +
+            "they must never block or force NO_GO."
+        )
     },
     outputSchema
   },

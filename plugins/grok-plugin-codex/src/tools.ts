@@ -506,7 +506,12 @@ function addCommonCommandArgs(
 }
 
 export function buildRunArgs(
-  params: CommonArgs & { readOnly?: boolean; capabilities?: GrokCapabilities }
+  params: CommonArgs & {
+    readOnly?: boolean;
+    capabilities?: GrokCapabilities;
+    knownModels?: string[];
+    reasoningEffortUnsupported?: string[];
+  }
 ): { args: string[]; warnings: string[] } {
   return addCommonCommandArgs(params);
 }
@@ -517,6 +522,8 @@ export function buildContinueArgs(
     continueLatest?: boolean;
     readOnly?: boolean;
     capabilities?: GrokCapabilities;
+    knownModels?: string[];
+    reasoningEffortUnsupported?: string[];
   }
 ): { args: string[]; warnings: string[] } {
   if (params.sessionId && params.continueLatest) {
@@ -1183,7 +1190,19 @@ export async function grokReview(args: CommonArgs & { target?: TargetLike; promp
   return await runOrStartJob({ ...args, kind: "review", prompt, readOnly: true });
 }
 
-export async function grokAdversarialReview(args: CommonArgs & { target?: TargetLike; prompt?: TargetLike }) {
+/**
+ * X3: an adversarial review of a single-user local application produced attack-framed prose that
+ * tripped the host's own cybersecurity filter and stopped the user's task mid-run. His words, the
+ * same evening: "I am building a film system for local use, so network security does not apply.
+ * Please stop interrupting my task." The scope the caller states is part of the contract, and a
+ * finding outside it is advisory — never a blocker.
+ */
+export const DEFAULT_THREAT_MODEL =
+  "Not specified by the caller. Treat anything outside the target's own stated scope as out-of-model.";
+
+export async function grokAdversarialReview(
+  args: CommonArgs & { target?: TargetLike; prompt?: TargetLike; threatModel?: string }
+) {
   let target: string;
   try {
     target = resolveTargetAlias("target", args.target, args.prompt, 16_384);
@@ -1194,6 +1213,11 @@ export async function grokAdversarialReview(args: CommonArgs & { target?: Target
     ...buildReadOnlyPreamble({ kind: "adversarial_review", maxTurns: args.maxTurns, timeoutMs: args.timeoutMs }),
     "You are Grok acting as a bounded failure-mode reviewer for Codex.",
     "Inspect only the explicit target below; do not expand past it.",
+    `Threat model / operating scope: ${args.threatModel ?? DEFAULT_THREAT_MODEL}`,
+    "Label every finding in-model or out-of-model against that scope. An out-of-model finding is " +
+      "advisory only: it must never be a blocker and must never turn the verdict into NO_GO.",
+    "Write in neutral engineering terms — failure mode, breakage path, robustness gap — not attack " +
+      "narrative.",
     "Stay read-only. Do not edit files, commit, push, deploy, or run destructive commands.",
     "Do not spawn subagents or perform repo-wide discovery unless the target is explicitly repo-wide.",
     "Report every finding you have, sorted by severity, and mark the first 5 as primary; never silently drop the rest.",

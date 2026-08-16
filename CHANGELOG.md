@@ -72,6 +72,15 @@ All notable user-visible and contract changes to `grok-plugin-codex`.
 
 ### Added
 
+- **X3 — an adversarial review interrupted the user's own task.** Attack-framed review prose tripped
+  the host's cybersecurity filter mid-run; the user's response that evening was "I am building a film
+  system for local use, so network security does not apply. Please stop interrupting my task."
+  `grok_adversarial_review` accepts **`threatModel`** (the operating scope to judge against), states it
+  in the prompt, and requires every finding to be labelled in-model or out-of-model, with out-of-model
+  findings advisory only — never a blocker, never NO_GO. When no scope is given the prompt says so
+  rather than inventing one. The prompt asks for neutral engineering vocabulary (failure mode,
+  breakage path, robustness gap) instead of attack narrative.
+
 - **GK9(a) — `tool_output_error` was unclassified.** A recorded run with `grok-composer-2.5-fast`
   failed because the model could not consume its own `Read` output; it landed in the generic bucket.
   New code **`model_tool_incompatible`** (non-retryable) says so and says to rerun with a full model,
