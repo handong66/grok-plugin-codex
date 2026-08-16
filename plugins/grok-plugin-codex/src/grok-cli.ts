@@ -475,6 +475,12 @@ const FREE_TIER_QUOTA_MARKERS = [
  */
 const AUTH_MARKERS = [
   "not logged in",
+  // §D M4 / FINAL Review M2: the recorded sign-in text says "signed in", not "logged in" — and it is
+  // also the wording of this plugin's own DEVICE_AUTH_MESSAGE, so a worker that reported the device
+  // prompt and then had its own message reclassified came back as a generic retryable failure.
+  "not signed in",
+  "sign in required",
+  "please sign in",
   "not authenticated",
   "login required",
   "log in required",

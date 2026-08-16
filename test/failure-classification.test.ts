@@ -76,6 +76,29 @@ describe("quota and auth classification (GPC-04)", () => {
     expect(classifyGrokErrorText("HTTP 401 Unauthorized: token expired")).toBe("auth_required");
   });
 
+  /**
+   * §D M4 / FINAL Review M2. The recorded sign-in text says "signed in", not "logged in", and so
+   * does this plugin's own device-authorization message — which the worker hands straight back to
+   * the classifier. Both used to come back as a generic retryable `grok_failed`, i.e. "try again",
+   * for a condition no retry can fix.
+   */
+  it("classifies the recorded sign-in wording, not only the 'logged in' spelling", async () => {
+    const workerSource = await readFile(
+      fileURLToPath(new URL("../plugins/grok-plugin-codex/src/job-worker.ts", import.meta.url)),
+      "utf8"
+    );
+
+    expect(classifyGrokErrorText("Grok is not signed in: run `grok login` first")).toBe("auth_required");
+    expect(classifyGrokErrorText("Error: sign in required to use this model")).toBe("auth_required");
+    expect(classifyGrokErrorText("Please sign in with the Grok CLI and try again.")).toBe("auth_required");
+    expect(isRetryableGrokFailure("auth_required")).toBe(false);
+    // The plugin's own DEVICE_AUTH_MESSAGE must survive a round trip through the classifier.
+    expect(workerSource).toContain("not signed in");
+    // The phrase is only ever matched against vendor error events and stderr (GPC-04), never against
+    // Grok's answer text, so a review that discusses sign-in states cannot reach this rule.
+    expect(errorEventText(JSON.stringify({ type: "text", data: "users not signed in see a 403" }))).toBe("");
+  });
+
   it("does not read a tool error's session_id as a missing session (X5)", () => {
     // The recorded stderr line. `session_id=<uuid>` contains the bare substring the old rule matched
     // on, and the worker feeds the classifier the whole stderr — so a Read that failed on a path that
