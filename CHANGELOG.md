@@ -45,6 +45,15 @@ All notable user-visible and contract changes to `grok-plugin-codex`.
 
 ### Added
 
+- **GK1 — device-authorization hang.** When the CLI's device authorization has expired it prints a sign-in
+  URL to stderr and waits for a browser that a headless job can never open, while `grok_status` still said
+  `running`; three recorded jobs sat there, one for the full 600 000 ms, during an unattended overnight run.
+  The worker now matches `accounts.x.ai/oauth2/device` / `Waiting for authorization` on stderr and, when it
+  appears in the first five seconds (before anything can have run), terminates the process tree and records
+  the non-retryable `auth_required` with `details.phase: "device_authorization"` instead of burning the
+  budget. `job.waitingForAuth` exposes the state on the cheap `grok_status` path, and the one-time
+  `user_code` is redacted out of every stderr the plugin returns — the actionable sign-in URL stays.
+
 - **X2 / GK2 — zero-evidence verdicts (contract change).** 30 of 64 `succeeded` Grok jobs made no tool call
   at all: a reviewer that never opened a file, whose "GO" was counted as a vote. `outputSummary` now reports
   `toolCallCount`, `filesInspected`, `turnsUsed`, and a derived `evidenceLevel` of `none` / `thin` /

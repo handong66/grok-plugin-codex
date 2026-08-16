@@ -7,7 +7,7 @@ import { join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import { promisify } from "node:util";
 import { buildWorkerEnv, discoverGrok, signalPidTree } from "./grok-cli.js";
-import { jobDiagnosticRedactor, type PathRedactor } from "./redact.js";
+import { jobDiagnosticRedactor, redactDeviceCode, type PathRedactor } from "./redact.js";
 import { summarizeGrokOutput } from "./result-parser.js";
 import {
   GrokPluginError,
@@ -155,6 +155,7 @@ export function toPublicJob(record: JobRecord): PublicJob {
     finishedAt: record.finishedAt,
     timeoutMs: record.timeoutMs,
     grokSessionId: record.grokSessionId,
+    waitingForAuth: record.waitingForAuth,
     exitCode: record.exitCode,
     signal: record.signal,
     error: record.error,
@@ -661,11 +662,17 @@ export class JobStore {
       readTail(this.stdoutPath(jobId), SUMMARY_READ_CHARS),
       readTail(this.stderrPath(jobId), SUMMARY_READ_CHARS)
     ]);
+    // The one-time OAuth device code never leaves the private log; the sign-in URL around it does.
     return {
       record,
       stdout,
-      stderr,
-      outputSummary: summarizeGrokOutput(record, summaryStdout, summaryStderr, record.outputTruncated)
+      stderr: redactDeviceCode(stderr),
+      outputSummary: summarizeGrokOutput(
+        record,
+        summaryStdout,
+        redactDeviceCode(summaryStderr),
+        record.outputTruncated
+      )
     };
   }
 

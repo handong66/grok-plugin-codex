@@ -104,6 +104,8 @@ export type JobRecord = {
   signal?: NodeJS.Signals | null;
   error?: PluginErrorInfo;
   cancelRequestedAt?: string;
+  /** The Grok CLI printed an OAuth device-authorization prompt instead of running (GK1). */
+  waitingForAuth?: boolean;
   outputTruncated?: boolean;
   /** True only when the capture window evicted `text`-event characters, i.e. answer text was lost. */
   textTruncated?: boolean;
@@ -120,6 +122,8 @@ export type PublicJob = {
   finishedAt?: string;
   timeoutMs: number;
   grokSessionId?: string;
+  /** Cheap signal that the run is blocked on an interactive sign-in, readable from grok_status. */
+  waitingForAuth?: boolean;
   exitCode?: number | null;
   signal?: NodeJS.Signals | null;
   error?: PluginErrorInfo;

@@ -23,6 +23,17 @@ import type { JobRecord } from "./types.js";
 const MAX_CAPTURE_CHARS = 1_000_000;
 const MAX_ERROR_MESSAGE_CHARS = 500;
 const MAX_STACK_TAIL_CHARS = 1_000;
+/**
+ * GK1: an expired device authorization makes the CLI print a sign-in URL and then wait. Three
+ * recorded jobs sat in that state — one burned all 600000ms of its budget — during an unattended
+ * overnight run, while status still said `running`. A prompt this early means the run never began.
+ */
+const DEVICE_AUTH_PATTERN = /accounts\.x\.ai\/oauth2\/device|Waiting for authorization/i;
+const DEVICE_AUTH_WINDOW_MS = 5_000;
+const DEVICE_AUTH_MESSAGE =
+  "Grok is not signed in: the CLI printed an OAuth device-authorization prompt for accounts.x.ai and " +
+  "then waited for a browser sign-in that a headless job can never complete. Sign in with the Grok CLI " +
+  "in an interactive terminal and retry. The one-time device code is deliberately not repeated here.";
 const execFileAsync = promisify(execFile);
 
 function boundedText(value: string, maxChars: number): string {
@@ -198,6 +209,9 @@ export async function runJobWorker(jobId: string, store = new JobStore()): Promi
   let teardownError: string | undefined;
   let timedOut = false;
   let cancelRequested = false;
+  let waitingForAuth = false;
+  let deviceAuthBlocked = false;
+  let authFlagChain = Promise.resolve();
   let forceKillTimer: NodeJS.Timeout | undefined;
   let flushTimer: NodeJS.Timeout | undefined;
   let heartbeatTimer: NodeJS.Timeout | undefined;
@@ -321,8 +335,30 @@ export async function runJobWorker(jobId: string, store = new JobStore()): Promi
       stdoutCapture.append(chunk);
       scheduleFlush();
     });
+    const runStartedAt = Date.now();
     child.stderr?.on("data", (chunk: string) => {
       stderrCapture.append(chunk);
+      if (!waitingForAuth && DEVICE_AUTH_PATTERN.test(chunk)) {
+        waitingForAuth = true;
+        // Also on the in-memory record, so the pending `record.pid` write cannot clobber the flag.
+        record.waitingForAuth = true;
+        // Publish the flag immediately: grok_status is the cheap path an unattended orchestrator polls.
+        authFlagChain = authFlagChain.catch(() => undefined).then(async () => {
+          const latest = await store.read(jobId);
+          if (!["succeeded", "failed", "cancelled"].includes(latest.status)) {
+            latest.waitingForAuth = true;
+            await store.write(latest);
+          }
+        });
+        void authFlagChain.catch(() => undefined);
+        if (Date.now() - runStartedAt <= DEVICE_AUTH_WINDOW_MS) {
+          // Nothing has run yet, so waiting out timeoutMs can only waste the whole budget.
+          deviceAuthBlocked = true;
+          signalProcessTree(child, "SIGTERM");
+          forceKillTimer ??= setTimeout(() => signalProcessTree(child, "SIGKILL"), 2_000);
+          forceKillTimer.unref();
+        }
+      }
       scheduleFlush();
     });
     record.pid = child.pid;
@@ -370,8 +406,21 @@ export async function runJobWorker(jobId: string, store = new JobStore()): Promi
     latest.textTruncated = stdoutCapture.droppedTextChars > 0;
     latest.textChars = stdoutCapture.textChars;
     latest.finishedAt = new Date().toISOString();
+    latest.waitingForAuth = waitingForAuth;
     if (latest.status === "cancelled" || latest.cancelRequestedAt || cancelRequested) {
       latest.status = "cancelled";
+    } else if (deviceAuthBlocked) {
+      latest.status = "failed";
+      latest.error = {
+        code: "auth_required",
+        message: DEVICE_AUTH_MESSAGE,
+        retryable: false,
+        details: {
+          phase: "device_authorization",
+          waitingForAuth: true,
+          ...(teardownError ? { teardownError } : {})
+        }
+      };
     } else if (timedOut) {
       latest.status = "failed";
       latest.error = {
@@ -480,7 +529,7 @@ export async function runJobWorker(jobId: string, store = new JobStore()): Promi
     if (flushTimer) clearTimeout(flushTimer);
     if (heartbeatTimer) clearInterval(heartbeatTimer);
     if (cancelPollTimer) clearInterval(cancelPollTimer);
-    await Promise.allSettled([flushChain, heartbeatChain, cancelPollPromise]);
+    await Promise.allSettled([flushChain, heartbeatChain, cancelPollPromise, authFlagChain]);
     if (forceKillTimer) clearTimeout(forceKillTimer);
     process.off("SIGTERM", requestCancel);
     process.off("SIGINT", requestCancel);

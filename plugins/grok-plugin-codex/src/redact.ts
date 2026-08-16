@@ -42,6 +42,15 @@ export function createPathRedactor(roots: RedactionRoot[]): PathRedactor {
 }
 
 /**
+ * GK1: a stalled Grok prints its OAuth device flow to stderr, including a one-time `user_code` that
+ * grants access to the account. The sign-in URL is the actionable part and stays; the code is a
+ * credential and must not travel into an orchestrator's context or transcript.
+ */
+export function redactDeviceCode(value: string): string {
+  return value.replace(/user_code=[A-Za-z0-9-]+/gi, "user_code=<redacted>");
+}
+
+/**
  * The roots a job diagnostic can plausibly name: the private state directory, the directory the
  * plugin is installed in (stack frames), and the user's home directory (everything else).
  */

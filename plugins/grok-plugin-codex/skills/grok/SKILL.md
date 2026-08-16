@@ -20,6 +20,7 @@ Operate the installed `grok_*` tools according to their current schemas. Codex o
 
 - A review or adversarial review that made **zero** tool calls inspected nothing. The plugin reports it as `no_evidence_review` with `outputSummary.evidenceLevel: "none"` and `resultComplete: false`; the text is still readable through `grok_result`. Record it as no signal, never as a passing vote. `evidenceLevel: "thin"` (tools used but no file named, or an answer under 400 characters) means the verdict needs corroboration. Use `outputSummary.toolCallCount`, `filesInspected`, and `turnsUsed` as the evidence record.
 - A vendor `stopReason: cancelled` is stored as a `cancelled` job, never as `succeeded`.
+- `job.waitingForAuth === true` means the Grok CLI is blocked on an interactive sign-in; a job that hits this in its first seconds fails immediately with a non-retryable `auth_required` rather than waiting out `timeoutMs`. Ask the user to sign in with the Grok CLI; the plugin never repeats the one-time device code.
 
 ## Safety and recovery
 
