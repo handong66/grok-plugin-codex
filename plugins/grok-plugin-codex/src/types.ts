@@ -142,6 +142,14 @@ export type JobOutputSummary = {
   textTruncated: boolean;
   /** Interactive skill/persona files Grok opened during a headless delegation (X1). */
   skillsLoaded: string[];
+  /** Tool calls observed in the stream; 0 means the delegate inspected nothing (X2). */
+  toolCallCount: number;
+  /** File paths named by tool events, bounded and de-duplicated. */
+  filesInspected: string[];
+  /** Turn count reported by the `end` event, when the CLI provides one. */
+  turnsUsed?: number;
+  /** none = no tool call at all; thin = tools but no files or a very short answer. */
+  evidenceLevel: "none" | "thin" | "substantive";
   eventCounts: Record<string, number>;
   grokSessionId?: string;
   requestId?: string;

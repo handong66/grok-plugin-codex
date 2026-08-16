@@ -18,6 +18,9 @@ Operate the installed `grok_*` tools according to their current schemas. Codex o
 - When `outputSummary.stopReasonRecognised === false` the plugin accepted an unfamiliar stop reason and said so in `warnings`. The answer is still returned; reject it only if your task needs strict vocabulary matching.
 - Continue only a known `sessionId` or explicitly request the latest session. Continuing a session that this plugin created for a review, adversarial review, or rescue inherits enforced read-only plan mode, and `alwaysApprove` on such a session is refused with `readonly_session_escalation`; when the session is unknown to the plugin the call proceeds with a warning saying the original mode could not be verified. Export returns Markdown; the plugin does not write a caller-selected output file.
 
+- A review or adversarial review that made **zero** tool calls inspected nothing. The plugin reports it as `no_evidence_review` with `outputSummary.evidenceLevel: "none"` and `resultComplete: false`; the text is still readable through `grok_result`. Record it as no signal, never as a passing vote. `evidenceLevel: "thin"` (tools used but no file named, or an answer under 400 characters) means the verdict needs corroboration. Use `outputSummary.toolCallCount`, `filesInspected`, and `turnsUsed` as the evidence record.
+- A vendor `stopReason: cancelled` is stored as a `cancelled` job, never as `succeeded`.
+
 ## Safety and recovery
 
 - Never send hidden Codex context, system/developer messages, reasoning, credentials, arbitrary tool output, or private paths such as `~/.codex`.

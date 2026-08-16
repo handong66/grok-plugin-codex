@@ -45,6 +45,20 @@ All notable user-visible and contract changes to `grok-plugin-codex`.
 
 ### Added
 
+- **X2 / GK2 — zero-evidence verdicts (contract change).** 30 of 64 `succeeded` Grok jobs made no tool call
+  at all: a reviewer that never opened a file, whose "GO" was counted as a vote. `outputSummary` now reports
+  `toolCallCount`, `filesInspected`, `turnsUsed`, and a derived `evidenceLevel` of `none` / `thin` /
+  `substantive`. For `kind: review` and `kind: adversarial_review`, `toolCallCount === 0` makes
+  `resultComplete` false with the warning `verdict produced with 0 tool calls — treat as opinion, not review`,
+  and the foreground call returns the new **`no_evidence_review`** code. The answer itself is never destroyed:
+  `grok_result` still returns the complete text. Plain `grok_run` is unaffected.
+- **X2 — a cancelled stop reason is no longer stored as `succeeded`.** 24 of 64 recorded jobs ended with
+  `stopReason: cancelled` and were persisted as `succeeded`; the worker now records them as `cancelled`.
+- **X2 — review output contract.** `grok_adversarial_review` no longer asks for "at most 5 findings", which
+  silently truncated adversarial coverage; it asks for all findings sorted by severity with the first five
+  marked primary. Both review prompts now require exact `file:line` evidence per finding and, for a passing
+  verdict, an explicit list of what was actually read or run.
+
 - **X1 — headless delegation preamble.** 57 of 128 recorded runs opened `~/.grok/skills/pua/SKILL.md` or a
   Superpowers skill before starting the task, because the repository's own `AGENTS.md` tells every agent to;
   12 of the 18 `max_turns_reached` jobs spent one of their first three reads on a `SKILL.md`. The prompts

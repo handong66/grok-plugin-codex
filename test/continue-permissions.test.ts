@@ -42,7 +42,7 @@ if [ "$1" = "--help" ]; then
   exit 0
 fi
 printf '%s\\n' "$@" > ${JSON.stringify(argvPath)}
-printf '%s\\n' '{"type":"text","data":"done"}' '{"type":"end","stopReason":"end_turn"}'
+printf '%s\\n' '{"type":"tool_call","toolCallId":"t1","toolName":"read_file","rawInput":{"path":"/repo/src/index.ts"}}' '{"type":"text","data":"done"}' '{"type":"end","stopReason":"end_turn"}'
 `
   );
   return { bin, argvPath };

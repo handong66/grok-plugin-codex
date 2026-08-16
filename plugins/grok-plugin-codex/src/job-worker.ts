@@ -406,6 +406,10 @@ export async function runJobWorker(jobId: string, store = new JobStore()): Promi
       if (parsed.streamError) {
         latest.status = "failed";
         latest.error = parsed.streamError;
+      } else if (parsed.state === "cancelled_partial") {
+        // X2: a vendor `cancelled` stop reason must not be stored as `succeeded`. 24 of 64 recorded
+        // jobs were, and downstream read them as completed work.
+        latest.status = "cancelled";
       } else {
         latest.status = outcome.exitCode === 0 ? "succeeded" : "failed";
         if (latest.status === "failed") {

@@ -518,6 +518,8 @@ async function runOrStartJob(params: CommonArgs & {
       stopReasonRecognised: result.outputSummary.stopReasonRecognised,
       grokSessionId: result.outputSummary.grokSessionId,
       requestId: result.outputSummary.requestId,
+      evidenceLevel: result.outputSummary.evidenceLevel,
+      toolCallCount: result.outputSummary.toolCallCount,
       textPreview: result.outputSummary.textPreview,
       streamError: result.outputSummary.streamError,
       guidance: result.outputSummary.guidance,
@@ -566,6 +568,22 @@ async function runOrStartJob(params: CommonArgs & {
           streamError.code,
           streamError.message,
           streamError.retryable,
+          diagnosticDetails,
+          failureWarnings
+        );
+      }
+      // X2: a review that made no tool call produced an opinion, not a review. It gets its own code
+      // so the caller can tell it apart from "no answer at all" and can still read the text.
+      if (
+        result.outputSummary.state === "succeeded_with_text" &&
+        result.outputSummary.evidenceLevel === "none"
+      ) {
+        throw new GrokPluginError(
+          "no_evidence_review",
+          "Grok returned a verdict without making a single tool call, so nothing was inspected. " +
+            "Inline the evidence into the target and rerun, or continue the session for the file:line " +
+            "evidence behind each claim. The text is available through grok_result.",
+          true,
           diagnosticDetails,
           failureWarnings
         );
@@ -756,6 +774,8 @@ export async function grokReview(args: CommonArgs & { target: string }) {
     `Review only this explicit target: ${args.target}`,
     "Stay read-only. Do not edit files, commit, push, deploy, or run destructive commands.",
     "Do not spawn subagents or expand into a broad security scan.",
+    "Every finding must carry exact file:line evidence; drop any claim you cannot anchor that way.",
+    "If you conclude the target is acceptable, list exactly what you read or ran to reach that conclusion.",
     "Return Findings first with exact file:line evidence, then Open questions and Test gaps."
   ].join("\n");
   return await runOrStartJob({ ...args, kind: "review", prompt, readOnly: true });
@@ -768,7 +788,10 @@ export async function grokAdversarialReview(args: CommonArgs & { target: string 
     `Inspect only this explicit target: ${args.target}`,
     "Stay read-only. Do not edit files, commit, push, deploy, or run destructive commands.",
     "Do not spawn subagents or perform repo-wide discovery unless the target is explicitly repo-wide.",
-    "Return at most 5 findings with exact file:line evidence, then Highest-risk assumption, Recommended verification, and Scope not inspected."
+    "Report every finding you have, sorted by severity, and mark the first 5 as primary; never silently drop the rest.",
+    "Every finding must carry exact file:line evidence; drop any claim you cannot anchor that way.",
+    "If you conclude the target is acceptable, list exactly what you read or ran to reach that conclusion.",
+    "Return the findings, then Highest-risk assumption, Recommended verification, and Scope not inspected."
   ].join("\n");
   return await runOrStartJob({ ...args, kind: "adversarial_review", prompt, readOnly: true });
 }

@@ -14,6 +14,8 @@ export function normalizeStopReason(value: string | undefined): string {
 
 const NORMAL_COMPLETION_STOP_REASONS = new Set(["endturn"]);
 const CANCELLED_STOP_REASONS = new Set(["cancelled", "canceled"]);
+/** 26 of 64 recorded "successful" answers were shorter than this. */
+const THIN_EVIDENCE_TEXT_CHARS = 400;
 
 /**
  * stdout only carries the session id inside the `end` event, which is exactly the event a killed or
@@ -72,6 +74,59 @@ function collectSkillLoads(line: string, into: Set<string>): void {
       if (name && name !== "skills") into.add(name);
     }
   }
+}
+
+/**
+ * X2: 30 of 64 `succeeded` review jobs made zero tool calls — a verdict from a reviewer that never
+ * opened a file. Recorded streams give every tool event a `toolCallId`, so unique ids are the
+ * count; a stream that only carries anonymous tool events still proves the calls happened, so the
+ * event count is the fallback. Either way the zero/non-zero distinction is exact.
+ */
+function toolCallIdOf(event: Record<string, unknown>): string | undefined {
+  const data = nestedRecord(event.data);
+  return (
+    stringValue(event.toolCallId) ??
+    stringValue(event.tool_call_id) ??
+    stringValue(event.id) ??
+    stringValue(data?.toolCallId) ??
+    stringValue(data?.id)
+  );
+}
+
+const FILE_PATH_KEYS = new Set(["path", "file", "file_path", "filePath", "filename", "fileName", "uri"]);
+
+function collectInspectedFiles(value: unknown, into: Set<string>, depth = 0): void {
+  if (depth > 6 || into.size > 200) return;
+  if (Array.isArray(value)) {
+    for (const entry of value) collectInspectedFiles(entry, into, depth + 1);
+    return;
+  }
+  const record = nestedRecord(value);
+  if (!record) return;
+  for (const [key, entry] of Object.entries(record)) {
+    if (FILE_PATH_KEYS.has(key)) {
+      const path = stringValue(entry);
+      if (path && path.length <= 4_096) into.add(path);
+      continue;
+    }
+    collectInspectedFiles(entry, into, depth + 1);
+  }
+}
+
+function turnCountOf(event: Record<string, unknown>): number | undefined {
+  const data = nestedRecord(event.data);
+  const usage = nestedRecord(event.usage) ?? nestedRecord(data?.usage);
+  for (const candidate of [
+    event.num_turns,
+    event.numTurns,
+    data?.num_turns,
+    data?.numTurns,
+    usage?.num_turns,
+    usage?.numTurns
+  ]) {
+    if (typeof candidate === "number" && Number.isFinite(candidate)) return candidate;
+  }
+  return undefined;
 }
 
 function previewText(text: string): string {
@@ -137,6 +192,10 @@ export function summarizeGrokOutput(
   let textEventCount = 0;
   let streamError: PluginErrorInfo | undefined;
   const skillsLoaded = new Set<string>();
+  const toolCallIds = new Set<string>();
+  const filesInspected = new Set<string>();
+  let toolEventCount = 0;
+  let turnsUsed: number | undefined;
 
   for (const line of stdout.split(/\r?\n/)) {
     if (!line.trim()) continue;
@@ -153,7 +212,13 @@ export function summarizeGrokOutput(
     eventCounts[eventType] = (eventCounts[eventType] ?? 0) + 1;
     streamError ??= streamErrorFrom(event);
 
-    if (eventType.startsWith("tool_call") || eventType === "tool_use") collectSkillLoads(line, skillsLoaded);
+    if (eventType.startsWith("tool_call") || eventType === "tool_use") {
+      collectSkillLoads(line, skillsLoaded);
+      toolEventCount += 1;
+      const id = toolCallIdOf(event);
+      if (id) toolCallIds.add(id);
+      collectInspectedFiles(event, filesInspected);
+    }
     if (eventType === "thought") thoughtEventCount += 1;
     if (eventType === "text") {
       const text = eventText(event);
@@ -167,6 +232,7 @@ export function summarizeGrokOutput(
       grokSessionId = eventMetadata(event, "sessionId") ?? grokSessionId;
       requestId = eventMetadata(event, "requestId") ?? requestId;
       stopReason = eventMetadata(event, "stopReason") ?? stopReason;
+      turnsUsed = turnCountOf(event) ?? turnsUsed;
     }
   }
 
@@ -199,10 +265,32 @@ export function summarizeGrokOutput(
   else if (record.status === "queued") state = "queued_partial";
   else state = "running_partial";
 
-  const resultComplete = state === "succeeded_with_text";
+  const toolCallCount = toolCallIds.size || toolEventCount;
+  const evidenceLevel: JobOutputSummary["evidenceLevel"] =
+    toolCallCount === 0
+      ? "none"
+      : filesInspected.size === 0 || finalText.trim().length < THIN_EVIDENCE_TEXT_CHARS
+        ? "thin"
+        : "substantive";
+  // X2: a review verdict from a reviewer that opened nothing is an opinion. 30 of 64 succeeded jobs
+  // made zero tool calls, and the orchestrator counted those as a vote.
+  const zeroEvidenceVerdict =
+    state === "succeeded_with_text" &&
+    toolCallCount === 0 &&
+    (record.kind === "review" || record.kind === "adversarial_review");
+  if (zeroEvidenceVerdict) {
+    warnings.push("verdict produced with 0 tool calls — treat as opinion, not review");
+  }
+
+  const resultComplete = state === "succeeded_with_text" && !zeroEvidenceVerdict;
   let guidance: string;
   if (resultComplete) {
     guidance = "Grok produced complete final text. Codex must still verify findings against the workspace before acting on them.";
+  } else if (zeroEvidenceVerdict) {
+    guidance =
+      "Grok returned a verdict without making a single tool call, so nothing in the workspace was inspected. " +
+      "Do not count it as a review: inline the evidence (diff, file excerpts, command output) into the target " +
+      "and rerun, or continue the session asking for the file:line evidence behind each claim.";
   } else if (textTruncated) {
     guidance = "Grok output exceeded the capture limit and answer text was dropped. Returned text is incomplete and must not be treated as a final result.";
   } else if (record.status === "running" || record.status === "queued") {
@@ -238,6 +326,10 @@ export function summarizeGrokOutput(
     outputTruncated,
     textTruncated,
     skillsLoaded: [...skillsLoaded],
+    toolCallCount,
+    filesInspected: [...filesInspected],
+    turnsUsed,
+    evidenceLevel,
     eventCounts,
     grokSessionId,
     requestId,
