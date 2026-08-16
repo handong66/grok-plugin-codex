@@ -22,7 +22,10 @@ import {
   errorEventText,
   freezeStreamFacts,
   observeStreamLine,
+  sessionIdFromStderr,
   summarizeGrokOutput,
+  NO_EVIDENCE_REVIEW_REMEDY,
+  SHELL_APPROVAL_REMEDY,
   type MutableStreamFacts,
   type StreamFacts
 } from "./result-parser.js";
@@ -610,8 +613,41 @@ export async function runJobWorker(jobId: string, store = new JobStore()): Promi
         // X2: a vendor `cancelled` stop reason must not be stored as `succeeded`. 24 of 64 recorded
         // jobs were, and downstream read them as completed work.
         latest.status = "cancelled";
+        // GK5 / X2: `permission_denied_headless` used to exist only on the foreground wait path,
+        // while review/adversarial_review/rescue now default to background — so on the default path
+        // a refused shell command reached the caller as a generic cancel with no `error.code` to
+        // branch on. The classification belongs on the record, where grok_status and grok_result
+        // both read it. `shellApprovalBlocked` already requires an enforced read-only job (X1).
+        if (parsed.shellApprovalBlocked) {
+          latest.error = {
+            code: "permission_denied_headless",
+            message: SHELL_APPROVAL_REMEDY,
+            retryable: false,
+            details: {
+              phase: "run",
+              deniedToolCalls: parsed.deniedToolCalls,
+              ...(teardownError ? { teardownError } : {})
+            }
+          };
+        }
       } else {
         latest.status = outcome.exitCode === 0 ? "succeeded" : "failed";
+        if (
+          latest.status === "succeeded" &&
+          !parsed.resultComplete &&
+          parsed.state === "succeeded_with_text" &&
+          parsed.evidenceLevel === "none"
+        ) {
+          // Same gap as above: the zero-evidence verdict was only ever a foreground code. The job
+          // stays `succeeded` — the text is real and reachable — but the record now says why it is
+          // not a review.
+          latest.error = {
+            code: "no_evidence_review",
+            message: NO_EVIDENCE_REVIEW_REMEDY,
+            retryable: true,
+            details: { phase: "run", toolCallCount: parsed.toolCallCount, evidenceLevel: parsed.evidenceLevel }
+          };
+        }
         if (latest.status === "failed") {
           const code = classifyGrokFailure({
             command: latest.command,

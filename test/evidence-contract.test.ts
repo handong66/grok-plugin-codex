@@ -253,6 +253,54 @@ printf '%s\\n' '{"type":"text","data":"partial work"}' '{"type":"end","stopReaso
     expect(finished.data.finalText).toBe("partial work");
   }, 30_000);
 
+  it("keeps a mutable run's shell use out of the plan-mode permission verdict (X1)", () => {
+    const shellThenCancelled = [
+      JSON.stringify({ type: "tool_call", toolCallId: "t1", name: "run_terminal_command", data: { command: "npm test" } }),
+      JSON.stringify({
+        type: "tool_call_update",
+        toolCallId: "t1",
+        name: "run_terminal_command",
+        data: { result: "12 passing" }
+      }),
+      JSON.stringify({ type: "text", data: "partial progress" }),
+      JSON.stringify({ type: "end", stopReason: "cancelled" })
+    ].join("\n");
+
+    const mutable = summarizeGrokOutput({ ...record("run", "cancelled"), readOnly: false }, shellThenCancelled);
+    const readOnly = summarizeGrokOutput({ ...record("review", "cancelled"), readOnly: true }, shellThenCancelled);
+    // The pre-0.3.0 shape of the same record: `readOnly` did not exist, so the kind decides.
+    const legacyReview = summarizeGrokOutput(record("adversarial_review", "cancelled"), shellThenCancelled);
+
+    expect(mutable.state).toBe("cancelled_partial");
+    // No plan mode was ever in force here, so neither the remedy nor the non-retryable permission
+    // code applies; the run just ended with a vendor cancellation.
+    expect(mutable.shellApprovalBlocked).toBe(false);
+    expect(mutable.guidance).not.toContain("plan mode");
+    expect(readOnly.shellApprovalBlocked).toBe(true);
+    expect(legacyReview.shellApprovalBlocked).toBe(true);
+  });
+
+  it("prefers a recorded denial over the bare last tool name (X1)", () => {
+    const deniedRead = [
+      JSON.stringify({
+        type: "tool_call_update",
+        toolCallId: "t1",
+        name: "read_file",
+        data: { result: "User cancelled the execution for tool read_file" }
+      }),
+      JSON.stringify({ type: "tool_call", toolCallId: "t2", name: "run_terminal_command" }),
+      JSON.stringify({ type: "end", stopReason: "cancelled" })
+    ].join("\n");
+
+    const summary = summarizeGrokOutput({ ...record("review", "cancelled"), readOnly: true }, deniedRead);
+
+    // The stream says exactly which tool was refused, and it was not the shell. The `lastToolName`
+    // guess only stands in for a stream that carried no parsable denial at all.
+    expect(summary.deniedToolCalls).toEqual([{ name: "read_file", count: 1 }]);
+    expect(summary.shellApprovalBlocked).toBe(false);
+    expect(summary.guidance).toContain("Inline the required command output");
+  });
+
   it("stops capping adversarial findings at five and demands file:line evidence", async () => {
     const dir = await tempDir();
     const stateDir = await tempDir();

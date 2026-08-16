@@ -113,6 +113,22 @@ export type JobRecord = {
   textChars?: number;
 };
 
+/** The kinds this plugin has always started with `--permission-mode plan --no-subagents`. */
+export const READ_ONLY_JOB_KINDS = new Set<JobKind>(["review", "adversarial_review", "rescue"]);
+
+/**
+ * GPC-M2: `readOnly` is new in 0.3.0, so every record written before it — including the retained
+ * seven days of jobs that actually carry a `grokSessionId` — has the field absent. Reading a missing
+ * field as `false` would resolve a real adversarial-review session to a mutable origin. The record
+ * still names its `kind`, and the kind is what decided the flags in the first place.
+ *
+ * A `continue` job carries an explicit `readOnly` because its mode is inherited, not implied by the
+ * kind, so it is answered by the stored field alone.
+ */
+export function jobWasReadOnly(record: Pick<JobRecord, "kind" | "readOnly">): boolean {
+  return record.readOnly ?? READ_ONLY_JOB_KINDS.has(record.kind);
+}
+
 export type PublicJob = {
   id: string;
   kind: JobKind;

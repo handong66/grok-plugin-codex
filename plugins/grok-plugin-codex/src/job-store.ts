@@ -11,6 +11,7 @@ import { jobDiagnosticRedactor, redactDeviceCode, type PathRedactor } from "./re
 import { summarizeGrokOutput, type StreamFacts } from "./result-parser.js";
 import {
   GrokPluginError,
+  jobWasReadOnly,
   type JobKind,
   type JobOutputSummary,
   type JobRecord,
@@ -48,20 +49,7 @@ const PROMPT_SOURCE_ARGS = new Set(["-p", "--single", "--prompt-file", "--prompt
 const STATE_MARKER_CONTENT = "grok-plugin-codex-state-v2\n";
 /** Bump when the persisted stream-summary shape changes; an older file is ignored, never guessed at. */
 export const STREAM_SUMMARY_VERSION = 1;
-/** The kinds this plugin has always started with `--permission-mode plan --no-subagents`. */
-const READ_ONLY_KINDS = new Set<JobKind>(["review", "adversarial_review", "rescue"]);
 const execFileAsync = promisify(execFile);
-
-/**
- * GPC-M2: `readOnly` is new in 0.3.0, so every record written before it — including the retained
- * seven days of jobs that actually carry a `grokSessionId` — has the field absent. Reading a missing
- * field as `false` would resolve a real adversarial-review session to a mutable origin and skip both
- * the inheritance and the "could not be verified" warning, which is the one case the item exists for.
- * The record still names its `kind`, and the kind is what decided the flags in the first place.
- */
-function recordWasReadOnly(record: JobRecord): boolean {
-  return record.readOnly ?? READ_ONLY_KINDS.has(record.kind);
-}
 
 export function defaultJobStateDir(env: NodeJS.ProcessEnv = process.env): string {
   if (env.GROK_PLUGIN_STATE_DIR) return resolve(env.GROK_PLUGIN_STATE_DIR);
@@ -569,7 +557,7 @@ export class JobStore {
       if (!JOB_ID_PATTERN.test(jobId)) continue;
       const record = await this.read(jobId).catch(() => null);
       if (!record || record.grokSessionId !== grokSessionId) continue;
-      readOnly ||= recordWasReadOnly(record);
+      readOnly ||= jobWasReadOnly(record);
       const candidate = { jobId, kind: record.kind, createdAt: Date.parse(record.createdAt) };
       if (!earliest || !Number.isFinite(earliest.createdAt) || candidate.createdAt <= earliest.createdAt) {
         earliest = candidate;

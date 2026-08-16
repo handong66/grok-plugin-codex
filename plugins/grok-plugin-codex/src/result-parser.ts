@@ -1,4 +1,4 @@
-import type { JobOutputSummary, JobRecord, PluginErrorInfo } from "./types.js";
+import { jobWasReadOnly, type JobOutputSummary, type JobRecord, type PluginErrorInfo } from "./types.js";
 import {
   CONTINUE_WITHOUT_TOOLS_REMEDY,
   classifyGrokErrorText,
@@ -46,6 +46,15 @@ export const SHELL_APPROVAL_REMEDY =
   "The turn was cancelled because a shell command needed approval in plan mode, not because the target " +
   "was too wide. Inline the required command output into the target, or continue the session with " +
   "\"do not use tools\". Narrowing the target does not address this.";
+
+/**
+ * X2: the one sentence for a verdict reached without opening anything. Shared by the worker (which
+ * classifies the background path) and the foreground error so the two cannot drift.
+ */
+export const NO_EVIDENCE_REVIEW_REMEDY =
+  "Grok returned a verdict without making a single tool call, so nothing was inspected. " +
+  "Inline the evidence into the target and rerun, or continue the session for the file:line " +
+  "evidence behind each claim. The text is available through grok_result.";
 
 const NORMAL_COMPLETION_STOP_REASONS = new Set(["endturn"]);
 const CANCELLED_STOP_REASONS = new Set(["cancelled", "canceled"]);
@@ -449,9 +458,18 @@ export function summarizeGrokOutput(
   const deniedShell = deniedToolCalls.some((entry) => SHELL_TOOL_PATTERN.test(entry.name));
   // GK5: a `cancelled` end whose last tool activity was a shell command in an enforced read-only
   // session was reported as "narrow the target", which is unrelated to the actual cause.
+  //
+  // X1: the enforced read-only mode is half the claim and was never checked. A mutable `grok_run`
+  // that used run_terminal_command successfully and then ended with a vendor `cancelled` stop reason
+  // has nothing to do with plan-mode approval, and reporting it as a non-retryable permission denial
+  // is the inverse of what GK5 exists for. The bare `lastToolName` is only a fallback for a stream
+  // that carried no parsable denial at all: an explicit denial list naming no shell tool is evidence
+  // against this classification, not missing evidence.
   const shellApprovalBlocked =
     state === "cancelled_partial" &&
-    (deniedShell || Boolean(lastToolName && SHELL_TOOL_PATTERN.test(lastToolName)));
+    jobWasReadOnly(record) &&
+    (deniedShell ||
+      (deniedToolCalls.length === 0 && Boolean(lastToolName && SHELL_TOOL_PATTERN.test(lastToolName))));
 
   const resultComplete = state === "succeeded_with_text" && !zeroEvidenceVerdict;
   // The stream's own error event wins; a stored record (the shape `grok_result` re-summarises) only

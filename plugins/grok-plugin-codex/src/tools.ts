@@ -18,7 +18,7 @@ import {
   type GrokInvocationProbe
 } from "./grok-cli.js";
 import { JobStore, toPublicJob } from "./job-store.js";
-import { SHELL_APPROVAL_REMEDY } from "./result-parser.js";
+import { NO_EVIDENCE_REVIEW_REMEDY, SHELL_APPROVAL_REMEDY } from "./result-parser.js";
 import { PLUGIN_VERSION } from "./version.js";
 import {
   GrokPluginError,
@@ -883,9 +883,7 @@ async function runOrStartJob(params: CommonArgs & {
       ) {
         throw new GrokPluginError(
           "no_evidence_review",
-          "Grok returned a verdict without making a single tool call, so nothing was inspected. " +
-            "Inline the evidence into the target and rerun, or continue the session for the file:line " +
-            "evidence behind each claim. The text is available through grok_result.",
+          NO_EVIDENCE_REVIEW_REMEDY,
           true,
           diagnosticDetails,
           failureWarnings
