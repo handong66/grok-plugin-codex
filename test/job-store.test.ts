@@ -3,7 +3,7 @@ import { join } from "node:path";
 import { describe, expect, it } from "vitest";
 import { JobStore, summarizeGrokOutput } from "../plugins/grok-plugin-codex/src/job-store.js";
 import type { JobRecord } from "../plugins/grok-plugin-codex/src/types.js";
-import { tempDir } from "./helpers.js";
+import { STOP_REASON_SPELLINGS, tempDir } from "./helpers.js";
 
 function record(status: JobRecord["status"]): JobRecord {
   return {
@@ -19,26 +19,30 @@ function record(status: JobRecord["status"]): JobRecord {
 }
 
 describe("Grok job output summary", () => {
-  it("ignores warning lines, concatenates text events, and requires an end event", () => {
-    const stdout = [
-      "2026 WARN non-json line",
-      "{\"type\":\"thought\",\"data\":\"thinking\"}",
-      "{\"type\":\"text\",\"data\":\"Hello\"}",
-      "{\"type\":\"text\",\"data\":\" world\"}",
-      "{\"type\":\"end\",\"stopReason\":\"EndTurn\",\"sessionId\":\"s1\",\"requestId\":\"r1\"}"
-    ].join("\n");
+  it.each(STOP_REASON_SPELLINGS.endTurn)(
+    "ignores warning lines, concatenates text events, and requires an end event (%s)",
+    (stopReason) => {
+      const stdout = [
+        "2026 WARN non-json line",
+        "{\"type\":\"thought\",\"data\":\"thinking\"}",
+        "{\"type\":\"text\",\"data\":\"Hello\"}",
+        "{\"type\":\"text\",\"data\":\" world\"}",
+        `{"type":"end","stopReason":"${stopReason}","sessionId":"s1","requestId":"r1"}`
+      ].join("\n");
 
-    const summary = summarizeGrokOutput(record("succeeded"), stdout);
+      const summary = summarizeGrokOutput(record("succeeded"), stdout);
 
-    expect(summary.resultComplete).toBe(true);
-    expect(summary.state).toBe("succeeded_with_text");
-    expect(summary.eventCounts).toEqual({ thought: 1, text: 2, end: 1 });
-    expect(summary.finalText).toBe("Hello world");
-    expect(summary.textPreview).toBe("Hello world");
-    expect(summary.grokSessionId).toBe("s1");
-    expect(summary.requestId).toBe("r1");
-    expect(summary.stopReason).toBe("EndTurn");
-  });
+      expect(summary.resultComplete).toBe(true);
+      expect(summary.state).toBe("succeeded_with_text");
+      expect(summary.eventCounts).toEqual({ thought: 1, text: 2, end: 1 });
+      expect(summary.finalText).toBe("Hello world");
+      expect(summary.textPreview).toBe("Hello world");
+      expect(summary.grokSessionId).toBe("s1");
+      expect(summary.requestId).toBe("r1");
+      expect(summary.stopReason).toBe(stopReason);
+      expect(summary.stopReasonNormalized).toBe("endturn");
+    }
+  );
 
   it("marks succeeded output without an end event as incomplete", () => {
     const summary = summarizeGrokOutput(record("succeeded"), "{\"type\":\"text\",\"data\":\"partial\"}");
@@ -48,26 +52,30 @@ describe("Grok job output summary", () => {
     expect(summary.sawEnd).toBe(false);
   });
 
-  it("treats a Cancelled end event as partial even when text was emitted", () => {
-    const stdout = [
-      '{"type":"text","data":"I will review the diff."}',
-      '{"type":"end","stopReason":"Cancelled","sessionId":"cancelled-session","requestId":"cancelled-request"}'
-    ].join("\n");
+  it.each(STOP_REASON_SPELLINGS.cancelled)(
+    "treats a %s end event as partial even when text was emitted",
+    (stopReason) => {
+      const stdout = [
+        '{"type":"text","data":"I will review the diff."}',
+        `{"type":"end","stopReason":"${stopReason}","sessionId":"cancelled-session","requestId":"cancelled-request"}`
+      ].join("\n");
 
-    const summary = summarizeGrokOutput(record("succeeded"), stdout);
+      const summary = summarizeGrokOutput(record("succeeded"), stdout);
 
-    expect(summary.resultComplete).toBe(false);
-    expect(summary.state).toBe("cancelled_partial");
-    expect(summary.finalText).toBe("I will review the diff.");
-    expect(summary.stopReason).toBe("Cancelled");
-    expect(summary.guidance).toContain("cancelled");
-  });
+      expect(summary.resultComplete).toBe(false);
+      expect(summary.state).toBe("cancelled_partial");
+      expect(summary.finalText).toBe("I will review the diff.");
+      expect(summary.stopReason).toBe(stopReason);
+      expect(summary.stopReasonNormalized).toBe("cancelled");
+      expect(summary.guidance).toContain("cancelled");
+    }
+  );
 
   it("classifies max_turns_reached streaming output as a typed partial failure", () => {
     const stdout = [
       '{"type":"thought","data":"finding a problem"}',
       '{"type":"max_turns_reached"}',
-      '{"type":"end","stopReason":"Cancelled","sessionId":"max-turns-session"}'
+      '{"type":"end","stopReason":"cancelled","sessionId":"max-turns-session"}'
     ].join("\n");
 
     const summary = summarizeGrokOutput(record("failed"), stdout, "Error: max turns reached");
@@ -76,7 +84,7 @@ describe("Grok job output summary", () => {
     expect(summary.state).toBe("failed_partial");
     expect(summary.streamError?.code).toBe("max_turns_reached");
     expect(summary.grokSessionId).toBe("max-turns-session");
-    expect(summary.guidance).toContain("increase maxTurns");
+    expect(summary.guidance).toContain("do not use any tools");
   });
 
   it("never marks truncated streaming output as complete", () => {
@@ -101,7 +109,7 @@ describe("Grok job output summary", () => {
     const dir = await tempDir();
     const store = new JobStore(dir);
     await store.write(record("succeeded"));
-    await writeFile(store.stdoutPath("job_1700000000000_abcdef12"), "{\"type\":\"text\",\"data\":\"OK\"}\n{\"type\":\"end\",\"stopReason\":\"EndTurn\",\"sessionId\":\"s1\"}\n");
+    await writeFile(store.stdoutPath("job_1700000000000_abcdef12"), "{\"type\":\"text\",\"data\":\"OK\"}\n{\"type\":\"end\",\"stopReason\":\"end_turn\",\"sessionId\":\"s1\"}\n");
     await writeFile(store.stderrPath("job_1700000000000_abcdef12"), "");
 
     const result = await store.result("job_1700000000000_abcdef12");
@@ -314,5 +322,58 @@ describe("Grok job output summary", () => {
     await store.cleanupExpiredJobs();
 
     await expect(access(store.inputPath(running.id))).resolves.toBeUndefined();
+  });
+});
+
+/**
+ * N1 (external fix-round-1 re-review). A record with no `grokSessionId` costs one
+ * `<id>.summary.json` read, and `findLatestSessionOrigin` asks `findSessionOrigin` about every
+ * candidate session — each of which rescans every record. The lookup was therefore O(N²) small reads
+ * on exactly the recovery path `continueLatest` and the degraded `grok_finalize({ cwd })` take.
+ */
+describe("session lookup cost", () => {
+  it("reads each job's stream summary at most once per lookup", async () => {
+    const stateDir = await tempDir();
+    class CountingStore extends JobStore {
+      summaryReads = 0;
+      override async readStreamProgress(jobId: string) {
+        this.summaryReads += 1;
+        return await super.readStreamProgress(jobId);
+      }
+    }
+    const store = new CountingStore({ stateDir });
+    await store.ensure();
+    const jobsDir = join(stateDir, "jobs");
+    const jobCount = 6;
+    for (let index = 0; index < jobCount; index += 1) {
+      const jobId = `job_latencyprobe000000000${index}`;
+      // Continuations only: none of them can be an origin, so the lookup walks every candidate.
+      await writeFile(
+        join(jobsDir, `${jobId}.json`),
+        JSON.stringify({
+          id: jobId,
+          kind: "continue",
+          status: "succeeded",
+          cwd: "/repo",
+          command: "grok",
+          args: [],
+          createdAt: new Date(1_700_000_000_000 + index * 1_000).toISOString(),
+          timeoutMs: 30_000
+        }),
+        { mode: 0o600 }
+      );
+      // `eventCounts` is what makes `readStreamProgress` accept the summary; without it the id is
+      // never learned, the candidate list stays empty and the quadratic walk never even happens.
+      await store.writeStreamSummary(
+        jobId,
+        JSON.stringify({ version: 1, grokSessionId: `session-${index}`, textChars: 1, eventCounts: { text: 1 } })
+      );
+    }
+
+    const origin = await store.findLatestSessionOrigin("/repo");
+
+    expect(origin).toBeUndefined();
+    // One read per record. Without the per-lookup cache this was jobCount * (jobCount + 1) = 42.
+    expect(store.summaryReads).toBeLessThanOrEqual(jobCount * 2);
   });
 });

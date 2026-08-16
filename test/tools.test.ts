@@ -13,13 +13,7 @@ import {
   grokSessions,
   grokStatus
 } from "../plugins/grok-plugin-codex/src/tools.js";
-import { fakeGrokScript, makeExecutable, tempDir } from "./helpers.js";
-
-type ToolResult = {
-  content: Array<{ type: string; text: string }>;
-  structuredContent?: Record<string, unknown>;
-  isError?: boolean;
-};
+import { STOP_REASON_SPELLINGS, ToolResult, fakeGrokScript, makeExecutable, tempDir, withEnv } from "./helpers.js";
 
 function envelope(result: ToolResult): Record<string, any> {
   const parsed = JSON.parse(result.content[0].text) as Record<string, any>;
@@ -29,22 +23,6 @@ function envelope(result: ToolResult): Record<string, any> {
   expect(parsed).toHaveProperty("error");
   expect(parsed).toHaveProperty("warnings");
   return parsed;
-}
-
-async function withEnv<T>(values: Record<string, string | undefined>, operation: () => Promise<T>): Promise<T> {
-  const previous = Object.fromEntries(Object.keys(values).map((key) => [key, process.env[key]]));
-  for (const [key, value] of Object.entries(values)) {
-    if (value === undefined) delete process.env[key];
-    else process.env[key] = value;
-  }
-  try {
-    return await operation();
-  } finally {
-    for (const [key, value] of Object.entries(previous)) {
-      if (value === undefined) delete process.env[key];
-      else process.env[key] = value;
-    }
-  }
 }
 
 function roots(dir: string) {
@@ -65,7 +43,11 @@ describe("Grok tool handlers", () => {
     expect(parsed.data.modelsListed).toBe(true);
     expect(parsed.data.modelInvocationTested).toBe(false);
     expect(parsed.data.callable).toBeNull();
-    expect(parsed.data.contractVersion).toBe("2");
+    expect(parsed.data.contractVersion).toBe("3");
+    // X9: the per-turn rules are readable from the check output, not only from the bundled skill.
+    expect(parsed.data.contract.recoveryTool).toBe("grok_finalize");
+    expect(parsed.data.contract.backgroundDefault.review).toBe(true);
+    expect(parsed.data.contract.timeoutMsDefault.adversarial_review).toBe(300_000);
   });
 
   it("grok_check reports an authenticated-model probe failure as a typed business error", async () => {
@@ -89,7 +71,53 @@ exit 7
     expect(result.isError).toBe(true);
     expect(parsed.ok).toBe(false);
     expect(parsed.error.code).toBe("auth_required");
-    expect(parsed.error.retryable).toBe(true);
+    // X7: the discovery tools used to hard-code `retryable: true`, so a caller obeying the flag
+    // looped `grok models` against a logged-out CLI. The classifier owns the flag on every path;
+    // the execution path has always reported this correctly.
+    expect(parsed.error.retryable).toBe(false);
+  });
+
+  it("does not advertise retry for a quota-exhausted discovery call", async () => {
+    const dir = await tempDir();
+    const grokBin = await makeExecutable(
+      join(dir, "grok"),
+      `#!/bin/sh
+if [ "$1" = "--version" ]; then echo "grok fake 1.0.3"; exit 0; fi
+if [ "$1" = "--help" ]; then
+  echo "--prompt-file --output-format streaming-json --permission-mode plan --no-subagents --disable-web-search"
+  exit 0
+fi
+echo "HTTP 402 Payment Required: usage balance exhausted" >&2
+exit 1
+`
+    );
+
+    const check = envelope(await withEnv({ GROK_BIN: grokBin }, () => grokCheck({ cwd: dir, ...roots(dir) })));
+    const models = envelope(await withEnv({ GROK_BIN: grokBin }, () => grokModels({ cwd: dir, ...roots(dir) })));
+
+    expect(check.error.code).toBe("quota_exhausted");
+    expect(check.error.retryable).toBe(false);
+    expect(models.error.code).toBe("quota_exhausted");
+    expect(models.error.retryable).toBe(false);
+  });
+
+  it("reports an unknown login state as \"unknown\" when the model listing never mentions login", async () => {
+    const dir = await tempDir();
+    const grokBin = await makeExecutable(
+      join(dir, "grok"),
+      fakeGrokScript({
+        modelsOutput: ["Default model: grok-4.5", "", "Available models:", "  * grok-4.5 (default)"].join("\n")
+      })
+    );
+
+    const parsed = envelope(await withEnv({ GROK_BIN: grokBin }, () => grokCheck({ cwd: dir, ...roots(dir) })));
+
+    expect(parsed.ok).toBe(true);
+    expect(parsed.data.modelsListed).toBe(true);
+    // X8 / SPEC §B GK1.3: a successful listing that is silent about login is undetermined, and
+    // publishing that silence as `false` turned it into a negative auth gate.
+    expect(parsed.data.authenticated).toBe("unknown");
+    expect(parsed.data.models.loggedIn).toBe("unknown");
   });
 
   it("grok_check does not report an explicit unauthenticated response as logged in", async () => {
@@ -116,30 +144,79 @@ exit 7
     expect(parsed.data.models.loggedIn).toBe(false);
   });
 
-  it("returns Cancelled output as a typed incomplete error with recovery metadata", async () => {
+  it.each(STOP_REASON_SPELLINGS.cancelled)(
+    "returns %s output as a typed incomplete error with recovery metadata",
+    async (stopReason) => {
+      const dir = await tempDir();
+      const stateDir = await tempDir();
+      const grokBin = await makeExecutable(
+        join(dir, "grok"),
+        `#!/bin/sh
+if [ "$1" = "--version" ]; then echo "grok fake 1.0.3"; exit 0; fi
+if [ "$1" = "--help" ]; then echo "--prompt-file streaming-json --permission-mode plan --no-subagents --disable-web-search"; exit 0; fi
+previous=""; for arg in "$@"; do if [ "$previous" = "--prompt-file" ]; then cat "$arg" >/dev/null; fi; previous="$arg"; done
+printf '%s\n' '{"type":"text","data":"I will review the diff."}' '{"type":"end","stopReason":"${stopReason}","sessionId":"cancelled-session","requestId":"cancelled-request"}'
+`
+      );
+
+      const result = await withEnv({ GROK_BIN: grokBin, GROK_PLUGIN_STATE_DIR: stateDir }, () =>
+        grokRun({ cwd: dir, ...roots(dir), background: false, prompt: "review" })
+      );
+      const parsed = envelope(result);
+
+      expect(result.isError).toBe(true);
+      expect(parsed.error.code).toBe("cancelled_output");
+      expect(parsed.error.details.outputState).toBe("cancelled_partial");
+      expect(parsed.error.details.stopReason).toBe(stopReason);
+      expect(parsed.error.details.stopReasonNormalized).toBe("cancelled");
+      expect(parsed.error.details.stopReasonRecognised).toBe(true);
+      expect(parsed.error.details.grokSessionId).toBe("cancelled-session");
+      expect(parsed.error.details.textPreview).toBe("I will review the diff.");
+      // GK4: the remedy names the one-call primitive first, then the manual equivalent.
+      expect(parsed.error.details.guidance).toContain("grok_finalize");
+      expect(parsed.error.details.guidance).toContain("grok_continue, maxTurns: 1");
+    }
+  );
+
+  it.each(STOP_REASON_SPELLINGS.endTurn)(
+    "returns a complete foreground answer for a %s stream",
+    async (stopReason) => {
+      const dir = await tempDir();
+      const stateDir = await tempDir();
+      const grokBin = await makeExecutable(join(dir, "grok"), fakeGrokScript({ stopReason }));
+
+      const result = await withEnv({ GROK_BIN: grokBin, GROK_PLUGIN_STATE_DIR: stateDir }, () =>
+        // An explicit short budget keeps this case free of the long-foreground-budget warning.
+        grokRun({ cwd: dir, ...roots(dir), background: false, timeoutMs: 30_000, prompt: "review" })
+      );
+      const parsed = envelope(result);
+
+      expect(parsed.ok).toBe(true);
+      expect(parsed.data.finalText).toBe("OK");
+      expect(parsed.data.outputSummary.resultComplete).toBe(true);
+      expect(parsed.data.outputSummary.stopReason).toBe(stopReason);
+      expect(parsed.data.outputSummary.stopReasonRecognised).toBe(true);
+      expect(parsed.warnings).toEqual([]);
+    }
+  );
+
+  it("accepts an unknown stop reason but reports it as an explicit warning", async () => {
     const dir = await tempDir();
     const stateDir = await tempDir();
-    const grokBin = await makeExecutable(
-      join(dir, "grok"),
-      `#!/bin/sh
-if [ "$1" = "--version" ]; then echo "grok fake 0.2.93"; exit 0; fi
-if [ "$1" = "--help" ]; then echo "--prompt-file streaming-json --permission-mode plan --no-subagents --disable-web-search"; exit 0; fi
-printf '%s\n' '{"type":"text","data":"I will review the diff."}' '{"type":"end","stopReason":"Cancelled","sessionId":"cancelled-session","requestId":"cancelled-request"}'
-`
-    );
+    const grokBin = await makeExecutable(join(dir, "grok"), fakeGrokScript({ stopReason: "conversation_over" }));
 
     const result = await withEnv({ GROK_BIN: grokBin, GROK_PLUGIN_STATE_DIR: stateDir }, () =>
-      grokRun({ cwd: dir, ...roots(dir), prompt: "review" })
+      grokRun({ cwd: dir, ...roots(dir), background: false, prompt: "review" })
     );
     const parsed = envelope(result);
 
-    expect(result.isError).toBe(true);
-    expect(parsed.error.code).toBe("cancelled_output");
-    expect(parsed.error.details.outputState).toBe("cancelled_partial");
-    expect(parsed.error.details.stopReason).toBe("Cancelled");
-    expect(parsed.error.details.grokSessionId).toBe("cancelled-session");
-    expect(parsed.error.details.textPreview).toBe("I will review the diff.");
-    expect(parsed.error.details.guidance).toContain("continue the session");
+    expect(parsed.ok).toBe(true);
+    expect(parsed.data.finalText).toBe("OK");
+    expect(parsed.data.outputSummary.stopReasonRecognised).toBe(false);
+    expect(parsed.data.outputSummary.stopReason).toBe("conversation_over");
+    expect(parsed.warnings).toContain(
+      'unrecognised stopReason "conversation_over"; treated as normal completion'
+    );
   });
 
   it("returns max-turn exhaustion with bounded stderr and session metadata", async () => {
@@ -150,23 +227,24 @@ printf '%s\n' '{"type":"text","data":"I will review the diff."}' '{"type":"end",
       `#!/bin/sh
 if [ "$1" = "--version" ]; then echo "grok fake 0.2.93"; exit 0; fi
 if [ "$1" = "--help" ]; then echo "--prompt-file streaming-json --permission-mode plan --no-subagents --disable-web-search"; exit 0; fi
-printf '%s\n' '{"type":"max_turns_reached"}' '{"type":"end","stopReason":"Cancelled","sessionId":"max-turns-session"}'
+previous=""; for arg in "$@"; do if [ "$previous" = "--prompt-file" ]; then cat "$arg" >/dev/null; fi; previous="$arg"; done
+printf '%s\n' '{"type":"max_turns_reached"}' '{"type":"end","stopReason":"cancelled","sessionId":"max-turns-session"}'
 echo 'Error: max turns reached' >&2
 exit 1
 `
     );
 
     const result = await withEnv({ GROK_BIN: grokBin, GROK_PLUGIN_STATE_DIR: stateDir }, () =>
-      grokRun({ cwd: dir, ...roots(dir), prompt: "review" })
+      grokRun({ cwd: dir, ...roots(dir), background: false, prompt: "review" })
     );
     const parsed = envelope(result);
 
     expect(result.isError).toBe(true);
     expect(parsed.error.code).toBe("max_turns_reached");
-    expect(parsed.error.details.stopReason).toBe("Cancelled");
+    expect(parsed.error.details.stopReason).toBe("cancelled");
     expect(parsed.error.details.grokSessionId).toBe("max-turns-session");
     expect(parsed.error.details.stderrTail).toContain("max turns reached");
-    expect(parsed.error.details.guidance).toContain("increase maxTurns");
+    expect(parsed.error.details.guidance).toContain("do not use any tools");
     expect(parsed.error.details.streamError.code).toBe("max_turns_reached");
   });
 
@@ -191,23 +269,207 @@ exit 99
 
     expect(parsed.ok).toBe(true);
     expect(parsed.data.modelsListed).toBe(false);
-    expect(parsed.data.authenticated).toBeNull();
+    // GK1 third item / GPC-10.3: an undetermined fact is reported as "unknown", never as null —
+    // a recorded gate decision read the null as "not authenticated" and let the next job start.
+    expect(parsed.data.authenticated).toBe("unknown");
+    expect(parsed.data.entitled).toBe("unknown");
   });
 
-  it("grok_run sends prompt text through a private file descriptor instead of argv or retained state", async () => {
+  it("grok_check proves callability only when the invocation probe is explicitly requested", async () => {
     const dir = await tempDir();
-    const argsFile = join(dir, "argv.log");
-    const stateDir = await tempDir();
+    const argsFile = join(dir, "probe-argv.log");
     const grokBin = await makeExecutable(
       join(dir, "grok"),
       `#!/bin/sh
-if [ "$1" = "--version" ]; then echo "grok fake 0.2.93"; exit 0; fi
+if [ "$1" = "--version" ]; then echo "grok fake 1.0.3"; exit 0; fi
 if [ "$1" = "--help" ]; then
-  echo "--prompt-file --output-format streaming-json --permission-mode plan --no-subagents --disable-web-search --reasoning-effort"
+  echo "--prompt-file --output-format streaming-json --permission-mode plan --no-subagents --disable-web-search"
+  exit 0
+fi
+if { [ "$1" = "models" ]; } || { [ "$1" = "--cwd" ] && [ "$3" = "models" ]; }; then
+  echo "You are logged in with grok.com."
   exit 0
 fi
 printf '%s\n' "$@" > ${JSON.stringify(argsFile)}
-printf '%s\n' '{"type":"text","data":"OK"}' '{"type":"end","stopReason":"EndTurn","sessionId":"s1"}'
+printf '%s\n' '{"type":"text","data":"OK"}' '{"type":"end","stopReason":"end_turn","sessionId":"probe"}'
+`
+    );
+
+    const skipped = await withEnv({ GROK_BIN: grokBin }, () => grokCheck({ cwd: dir, ...roots(dir) }));
+    const probed = await withEnv({ GROK_BIN: grokBin }, () =>
+      grokCheck({ cwd: dir, ...roots(dir), probeInvocation: true })
+    );
+    const skippedParsed = envelope(skipped);
+    const probedParsed = envelope(probed);
+    const argv = await readFile(argsFile, "utf8");
+
+    // Default stays off: the account behind this plugin hit its free limit ten times.
+    expect(skippedParsed.data.modelInvocationTested).toBe(false);
+    expect(skippedParsed.data.callable).toBeNull();
+    expect(probedParsed.data.modelInvocationTested).toBe(true);
+    expect(probedParsed.data.callable).toBe(true);
+    expect(probedParsed.data.observedStopReason).toBe("end_turn");
+    expect(probedParsed.data.observedStopReasonNormalized).toBe("endturn");
+    expect(probedParsed.data.observedEventTypes).toEqual(["text", "end"]);
+    expect(argv).toContain("--max-turns\n1\n");
+    expect(argv).toContain("--permission-mode\nplan\n");
+    expect(argv).toContain("--prompt-file\n");
+    expect(argv).not.toContain("Reply with exactly");
+  });
+
+  it("grok_check reports an invocation probe that never reaches a normal end turn", async () => {
+    const dir = await tempDir();
+    const grokBin = await makeExecutable(
+      join(dir, "grok"),
+      `#!/bin/sh
+if [ "$1" = "--version" ]; then echo "grok fake 1.0.3"; exit 0; fi
+if [ "$1" = "--help" ]; then
+  echo "--prompt-file --output-format streaming-json --permission-mode plan --no-subagents --disable-web-search"
+  exit 0
+fi
+printf '%s\n' '{"type":"text","data":"OK"}' '{"type":"end","stopReason":"cancelled","sessionId":"probe"}'
+`
+    );
+
+    const result = await withEnv({ GROK_BIN: grokBin }, () =>
+      grokCheck({ cwd: dir, includeModels: false, ...roots(dir), probeInvocation: true })
+    );
+    const parsed = envelope(result);
+
+    expect(parsed.ok).toBe(true);
+    expect(parsed.data.modelInvocationTested).toBe(true);
+    expect(parsed.data.callable).toBe(false);
+    expect(parsed.data.observedStopReason).toBe("cancelled");
+    expect(parsed.warnings.join(" ")).toContain("normal end turn");
+  });
+
+  /**
+   * X16. The probe used to report only `exited N`, discarding the CLI's own error events and stderr.
+   * An account whose paid balance is gone still lists models fine, so `grok models` succeeded and
+   * `entitled` came back `"unknown"` — an undetermined fact standing in for one the probe had just
+   * determined, on the one call the caller explicitly paid quota to make.
+   */
+  it("grok_check reads why the invocation probe failed instead of only its exit code", async () => {
+    const dir = await tempDir();
+    const grokBin = await makeExecutable(
+      join(dir, "grok"),
+      `#!/bin/sh
+if [ "$1" = "--version" ]; then echo "grok fake 1.0.3"; exit 0; fi
+if [ "$1" = "--help" ]; then
+  echo "--prompt-file --output-format streaming-json --permission-mode plan --no-subagents --disable-web-search"
+  exit 0
+fi
+if { [ "$1" = "models" ]; } || { [ "$1" = "--cwd" ] && [ "$3" = "models" ]; }; then
+  echo "You are logged in with grok.com."
+  echo "Default model: grok-4.6"
+  exit 0
+fi
+printf '%s\\n' '{"type":"error","error":"402 Payment Required: balance exhausted"}'
+exit 1
+`
+    );
+
+    const parsed = envelope(
+      await withEnv({ GROK_BIN: grokBin }, () => grokCheck({ cwd: dir, ...roots(dir), probeInvocation: true }))
+    );
+
+    expect(parsed.ok).toBe(true);
+    expect(parsed.data.callable).toBe(false);
+    // `grok models` succeeded, so listing alone would have said nothing about quota.
+    expect(parsed.data.modelsListed).toBe(true);
+    expect(parsed.data.authenticated).toBe(true);
+    expect(parsed.data.entitled).toBe(false);
+    expect(parsed.warnings.join(" ")).toContain("quota_exhausted");
+    expect(parsed.warnings.join(" ")).toContain("balance exhausted");
+  });
+
+  it("grok_check never publishes the one-time device code from a failed probe", async () => {
+    const dir = await tempDir();
+    const grokBin = await makeExecutable(
+      join(dir, "grok"),
+      `#!/bin/sh
+if [ "$1" = "--version" ]; then echo "grok fake 1.0.3"; exit 0; fi
+if [ "$1" = "--help" ]; then
+  echo "--prompt-file --output-format streaming-json --permission-mode plan --no-subagents --disable-web-search"
+  exit 0
+fi
+echo "Visit https://accounts.x.ai/oauth2/device and enter user_code=ABCD-1234" >&2
+exit 1
+`
+    );
+
+    const parsed = envelope(
+      await withEnv({ GROK_BIN: grokBin }, () =>
+        grokCheck({ cwd: dir, includeModels: false, ...roots(dir), probeInvocation: true })
+      )
+    );
+
+    expect(parsed.warnings.join(" ")).toContain("accounts.x.ai");
+    expect(JSON.stringify(parsed)).not.toContain("ABCD-1234");
+  });
+
+  it("grok_check refuses to spend quota on an invocation probe a CLI cannot run read-only", async () => {
+    const dir = await tempDir();
+    const argsFile = join(dir, "unreachable-probe-argv.log");
+    // A Grok build that dropped `--permission-mode`: probing it would be an unconstrained live call.
+    const grokBin = await makeExecutable(
+      join(dir, "grok"),
+      `#!/bin/sh
+if [ "$1" = "--version" ]; then echo "grok fake 1.1.0"; exit 0; fi
+if [ "$1" = "--help" ]; then
+  echo "--prompt-file --output-format streaming-json --no-subagents --disable-web-search"
+  exit 0
+fi
+printf '%s\n' "$@" > ${JSON.stringify(argsFile)}
+printf '%s\n' '{"type":"text","data":"OK"}' '{"type":"end","stopReason":"end_turn","sessionId":"probe"}'
+`
+    );
+
+    const result = await withEnv({ GROK_BIN: grokBin }, () =>
+      grokCheck({ cwd: dir, includeModels: false, ...roots(dir), probeInvocation: true })
+    );
+    const parsed = envelope(result);
+
+    expect(parsed.ok).toBe(false);
+    expect(parsed.error.code).toBe("cli_incompatible");
+    expect(parsed.error.retryable).toBe(false);
+    expect(parsed.error.details.missing).toEqual(["--permission-mode plan"]);
+    expect(parsed.error.details.capabilities.permissionModePlan).toBe(false);
+    await expect(access(argsFile)).rejects.toMatchObject({ code: "ENOENT" });
+  });
+
+  it("grok_run hands the complete prompt through a private FIFO that is unlinked after Grok opens it", async () => {
+    const dir = await tempDir();
+    const argsFile = join(dir, "argv.log");
+    const handoffFile = join(dir, "handoff.json");
+    const stateDir = await tempDir();
+    const prompt = `portable prompt sentinel\n${"x".repeat(32_768)}\ncomplete`;
+    const grokBin = await makeExecutable(
+      join(dir, "grok"),
+      `#!/usr/bin/env node
+import { existsSync, lstatSync, readFileSync, statSync, writeFileSync } from "node:fs";
+import { dirname } from "node:path";
+const args = process.argv.slice(2);
+if (args[0] === "--version") { console.log("grok fake 0.2.93"); process.exit(0); }
+if (args[0] === "--help") {
+  console.log("--prompt-file --output-format streaming-json --permission-mode plan --no-subagents --disable-web-search --reasoning-effort");
+  process.exit(0);
+}
+writeFileSync(${JSON.stringify(argsFile)}, args.join("\\n") + "\\n");
+const promptPath = args[args.indexOf("--prompt-file") + 1];
+const fifo = lstatSync(promptPath);
+const parent = statSync(dirname(promptPath));
+const prompt = readFileSync(promptPath, "utf8");
+writeFileSync(${JSON.stringify(handoffFile)}, JSON.stringify({
+  prompt,
+  promptPath,
+  isFifo: fifo.isFIFO(),
+  fifoMode: fifo.mode & 0o777,
+  parentMode: parent.mode & 0o777,
+  pathExistsAfterRead: existsSync(promptPath)
+}));
+console.log(JSON.stringify({ type: "text", data: "OK" }));
+console.log(JSON.stringify({ type: "end", stopReason: "end_turn", sessionId: "s1" }));
 `
     );
 
@@ -215,8 +477,9 @@ printf '%s\n' '{"type":"text","data":"OK"}' '{"type":"end","stopReason":"EndTurn
       grokRun({
         cwd: dir,
         ...roots(dir),
+        background: false,
         model: "grok-build",
-        prompt: "review this diff",
+        prompt,
         disableWebSearch: true,
         noSubagents: true,
         maxTurns: 1
@@ -226,13 +489,22 @@ printf '%s\n' '{"type":"text","data":"OK"}' '{"type":"end","stopReason":"EndTurn
     const argv = await readFile(argsFile, "utf8");
     const argvLines = argv.trim().split("\n");
     const promptPath = argvLines[argvLines.indexOf("--prompt-file") + 1];
+    const handoff = JSON.parse(await readFile(handoffFile, "utf8"));
 
     expect(parsed.ok).toBe(true);
     expect(parsed.data.finalText).toBe("OK");
     expect(argv).toContain("--output-format\nstreaming-json\n");
     expect(argv).toContain("--prompt-file\n");
-    expect(argv).not.toContain("review this diff");
-    expect(promptPath).toBe("/dev/fd/3");
+    expect(argv).not.toContain(prompt);
+    expect(promptPath).not.toBe("/dev/fd/3");
+    expect(handoff).toMatchObject({
+      prompt,
+      promptPath,
+      isFifo: true,
+      fifoMode: 0o600,
+      parentMode: 0o700,
+      pathExistsAfterRead: false
+    });
     expect((await readdir(join(stateDir, "jobs"))).filter((entry) => entry.endsWith(".input"))).toEqual([]);
   });
 
@@ -244,9 +516,10 @@ printf '%s\n' '{"type":"text","data":"OK"}' '{"type":"end","stopReason":"EndTurn
       `#!/bin/sh
 if [ "$1" = "--version" ]; then echo "grok fake 0.2.93"; exit 0; fi
 if [ "$1" = "--help" ]; then echo "--prompt-file streaming-json --permission-mode plan --no-subagents --disable-web-search"; exit 0; fi
+previous=""; for arg in "$@"; do if [ "$previous" = "--prompt-file" ]; then cat "$arg" >/dev/null; fi; previous="$arg"; done
 if [ "$GROK_PLUGIN_CODEX_SECRET_TEST" = "should-not-leak" ]; then value=LEAKED; else value=CLEAN; fi
 printf '{"type":"text","data":"%s"}\n' "$value"
-printf '%s\n' '{"type":"end","stopReason":"EndTurn","sessionId":"s1"}'
+printf '%s\n' '{"type":"end","stopReason":"end_turn","sessionId":"s1"}'
 `
     );
 
@@ -256,7 +529,7 @@ printf '%s\n' '{"type":"end","stopReason":"EndTurn","sessionId":"s1"}'
         GROK_PLUGIN_STATE_DIR: stateDir,
         GROK_PLUGIN_CODEX_SECRET_TEST: "should-not-leak"
       },
-      () => grokRun({ cwd: dir, ...roots(dir), prompt: "env check" })
+      () => grokRun({ cwd: dir, ...roots(dir), background: false, prompt: "env check" })
     );
     const parsed = envelope(result);
 
@@ -278,7 +551,7 @@ exit 1
     );
 
     const result = await withEnv({ GROK_BIN: grokBin, GROK_PLUGIN_STATE_DIR: stateDir }, () =>
-      grokRun({ cwd: dir, ...roots(dir), prompt: "quota probe" })
+      grokRun({ cwd: dir, ...roots(dir), background: false, prompt: "quota probe" })
     );
     const parsed = envelope(result);
 
@@ -287,24 +560,22 @@ exit 1
     expect(parsed.error.message).toContain("usage balance is exhausted");
   });
 
-  it("fails when the Grok CLI closes the inherited prompt descriptor before full delivery", async () => {
+  it("fails when the Grok CLI reports success without opening its private prompt source", async () => {
     const dir = await tempDir();
     const stateDir = await tempDir();
     const grokBin = await makeExecutable(
       join(dir, "grok"),
       `#!/usr/bin/env node
-import { closeSync } from "node:fs";
 const args = process.argv.slice(2);
 if (args[0] === "--version") { console.log("grok fake 0.2.93"); process.exit(0); }
 if (args[0] === "--help") { console.log("--prompt-file streaming-json --permission-mode plan --no-subagents --disable-web-search"); process.exit(0); }
-closeSync(3);
 console.log(JSON.stringify({ type: "text", data: "invalid success" }));
 console.log(JSON.stringify({ type: "end", sessionId: "s1" }));
 `
     );
 
     const result = await withEnv({ GROK_BIN: grokBin, GROK_PLUGIN_STATE_DIR: stateDir }, () =>
-      grokRun({ cwd: dir, ...roots(dir), prompt: "x".repeat(250_000) })
+      grokRun({ cwd: dir, ...roots(dir), background: false, prompt: "x".repeat(250_000) })
     );
     const parsed = envelope(result);
 
@@ -337,7 +608,7 @@ console.log(JSON.stringify({ type: "end", sessionId: "s1" }));
   it("blocks Codex private runtime paths as a typed business error", async () => {
     const dir = await tempDir();
     const stateDir = await tempDir();
-    const result = await grokRun({ cwd: dir, ...roots(dir), prompt: "Read ~/.codex/config.toml." });
+    const result = await grokRun({ cwd: dir, ...roots(dir), background: false, prompt: "Read ~/.codex/config.toml." });
     const parsed = envelope(result);
 
     expect(result.isError).toBe(true);
@@ -353,13 +624,14 @@ console.log(JSON.stringify({ type: "end", sessionId: "s1" }));
       `#!/bin/sh
 if [ "$1" = "--version" ]; then echo "grok fake 0.2.93"; exit 0; fi
 if [ "$1" = "--help" ]; then echo "--prompt-file streaming-json --permission-mode plan --no-subagents --disable-web-search"; exit 0; fi
+previous=""; for arg in "$@"; do if [ "$previous" = "--prompt-file" ]; then cat "$arg" >/dev/null; fi; previous="$arg"; done
 printf '%s\n' "$@" > ${JSON.stringify(argsFile)}
-printf '%s\n' '{"type":"text","data":"diagnosis"}' '{"type":"end","stopReason":"EndTurn","sessionId":"s1"}'
+printf '%s\n' '{"type":"text","data":"diagnosis"}' '{"type":"end","stopReason":"end_turn","sessionId":"s1"}'
 `
     );
 
     const result = await withEnv({ GROK_BIN: grokBin, GROK_PLUGIN_STATE_DIR: stateDir }, () =>
-      grokRescue({ cwd: dir, ...roots(dir), problem: "diagnose" })
+      grokRescue({ cwd: dir, ...roots(dir), background: false, problem: "diagnose" })
     );
     const parsed = envelope(result);
     const argv = await readFile(argsFile, "utf8");
@@ -372,7 +644,7 @@ printf '%s\n' '{"type":"text","data":"diagnosis"}' '{"type":"end","stopReason":"
 
   it("requires an explicit continue target before probing the CLI", async () => {
     const dir = await tempDir();
-    const result = await grokContinue({ cwd: dir, ...roots(dir), prompt: "continue" });
+    const result = await grokContinue({ cwd: dir, ...roots(dir), background: false, prompt: "continue" });
     const parsed = envelope(result);
 
     expect(parsed.error.code).toBe("continue_target_required");
@@ -381,7 +653,7 @@ printf '%s\n' '{"type":"text","data":"diagnosis"}' '{"type":"end","stopReason":"
   it("rejects session identifiers that look like CLI flags", async () => {
     const dir = await tempDir();
     const continued = envelope(
-      await grokContinue({ cwd: dir, ...roots(dir), prompt: "continue", sessionId: "--help" })
+      await grokContinue({ cwd: dir, ...roots(dir), background: false, prompt: "continue", sessionId: "--help" })
     );
     const exported = envelope(await grokExport({ cwd: dir, ...roots(dir), sessionId: "--help" }));
 
@@ -439,7 +711,7 @@ printf '%s\n' '{"type":"text","data":"diagnosis"}' '{"type":"end","stopReason":"
     const stateDir = join(dir, ".private-state");
     const grokBin = await makeExecutable(join(dir, "grok"), fakeGrokScript());
     const result = await withEnv({ GROK_BIN: grokBin, GROK_PLUGIN_STATE_DIR: stateDir }, () =>
-      grokRun({ cwd: dir, ...roots(dir), prompt: "state isolation probe" })
+      grokRun({ cwd: dir, ...roots(dir), background: false, prompt: "state isolation probe" })
     );
     const parsed = envelope(result);
 
@@ -456,7 +728,7 @@ printf '%s\n' '{"type":"text","data":"diagnosis"}' '{"type":"end","stopReason":"
 
     const parsed = envelope(
       await withEnv({ GROK_BIN: grokBin, GROK_PLUGIN_STATE_DIR: stateDir }, () =>
-        grokRun({ cwd, ...roots(root), prompt: "root-wide state isolation probe" })
+        grokRun({ cwd, ...roots(root), background: false, prompt: "root-wide state isolation probe" })
       )
     );
 
@@ -472,7 +744,7 @@ printf '%s\n' '{"type":"text","data":"diagnosis"}' '{"type":"end","stopReason":"
 
     const parsed = envelope(
       await withEnv({ GROK_BIN: grokBin, GROK_PLUGIN_STATE_DIR: stateDir }, () =>
-        grokRun({ cwd: root, ...roots(root), prompt: "ancestor state isolation probe" })
+        grokRun({ cwd: root, ...roots(root), background: false, prompt: "ancestor state isolation probe" })
       )
     );
 
@@ -502,6 +774,9 @@ printf '%s\n' '{"type":"text","data":"diagnosis"}' '{"type":"end","stopReason":"
     expect(parsed.error.code).toBe("internal_error");
     expect(parsed.error.message).toBe("The plugin encountered an internal error. Retry or run grok_check for diagnostics.");
     expect(result.content[0].text).not.toContain("/dev/null");
-    expect(result.content[0].text).not.toContain("ENOTDIR");
+    // GK9(d): the errno is the one discriminator the caller gets — it names the failure class without
+    // naming any path, message, or prompt text.
+    expect(parsed.error.details).toEqual({ cause: "Error", errnoCode: "ENOTDIR" });
+    expect(JSON.stringify(parsed.error.details)).not.toMatch(/\//);
   });
 });

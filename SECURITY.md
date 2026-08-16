@@ -29,3 +29,10 @@ Out of scope:
 ## Security Design Notes
 
 The plugin is designed to avoid copying Codex hidden context, system/developer messages, hidden reasoning, tool outputs, secrets, and private runtime paths into Grok prompts unless the user explicitly authorizes that risk.
+
+## Correctness fixes are shipped like security fixes
+
+Anything that can make the plugin report an incomplete or cancelled Grok run as a completed answer is
+treated as a security-class defect for release purposes: it goes public in the same session it is
+fixed. See the release cadence section in CONTRIBUTING.md for the process and for the 0.2.0/0.2.1
+incident that set it.

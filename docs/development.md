@@ -34,8 +34,12 @@ npm run smoke:live-grok
 - `src/server.ts` owns MCP names and input/output schemas.
 - `src/tools.ts` owns workspace validation, command construction, envelopes, and foreground polling behavior.
 - `src/job-store.ts` owns private state, owner-checked locks, atomic/monotonic persistence, process-group ownership verification, cancellation markers, cleanup, and public-job sanitization.
-- `src/job-worker.ts` owns foreground/background CLI process lifetime, heartbeat, timeout, tree termination, logs, and prompt handoff/cleanup.
-- `src/result-parser.ts` owns streaming finality.
+- `src/job-worker.ts` owns foreground/background CLI process lifetime, heartbeat, timeout, tree termination, logs, prompt handoff/cleanup, and terminal classification.
+- `src/result-parser.ts` owns streaming finality, and the single per-line stream observer
+  (`observeStreamLine`) that both the worker's incremental ledger and the fallback re-parse use. A new
+  stream fact must be added there once, never in two places.
+- `src/version.ts` owns the published version: `scripts/build.mjs` defines it from package.json, so no
+  source file may carry a version literal (`validate:plugin` and `contract-drift` both check this).
 - `scripts/smoke-mcp.mjs` and `test/contract-drift.test.ts` lock the published contract.
 - Bundled README and skill files explain the installed contract; the root README is developer and release documentation.
 
@@ -43,15 +47,46 @@ Adding, removing, or renaming a tool or argument must change the source schema a
 
 ## Command rules
 
-- Foreground and background prompts both use `streaming-json`; the worker removes the staging file before passing the prompt through native `--prompt-file /dev/fd/3`.
+- Foreground and background prompts both use `streaming-json`; the worker removes the staging file before passing the prompt through native `--prompt-file` backed by a `0600` FIFO in a random `0700` directory. The launcher waits for Grok to open the FIFO, unlinks the path, and only then writes the prompt.
 - Prompt text never appears in persisted job arguments or process argv.
-- Inherited prompt delivery must reach fd3 `finish`; premature close is a typed failure even if Grok prints a syntactically complete response.
+- Inherited worker-to-launcher delivery must reach fd3 `finish`, and the launcher-to-Grok FIFO must be opened and fully written; premature close is a typed failure even if Grok prints a syntactically complete response.
 - Read-only review/rescue tools force `--permission-mode plan` and `--no-subagents`.
 - Mutable runs pass `--always-approve` only when explicitly requested.
 - Continuation requires `sessionId` or explicit `continueLatest: true`.
+- A continuation inherits the read-only mode of the session's creating job; `continueLatest` infers that job from
+  the newest session this plugin started in the same `cwd`. The inference may only tighten permissions: it refuses
+  `alwaysApprove` (`readonly_session_escalation`, `details.inferredFromLatestJob`) and inherits plan mode, but it
+  never removes the "could not be verified" warning, which every inferred target keeps. SKILL.md and the
+  `grok_continue` description must state that rule and the explicit-`sessionId` escape hatch.
 - Discovery uses trusted `GROK_BIN`; there is no per-call executable path.
 - Required safety flags are capability-probed from the installed `grok --help` and fail closed when absent.
+- `missingRunCapabilities` is that gate and has one caller list: every path that starts a real Grok process, including
+  the opt-in `grok_check` invocation probe. A CLI missing the read-only flags gets `cli_incompatible`, never a live call.
 - Process-tree lifecycle is supported on macOS and Linux; package metadata and runtime checks reject other platforms.
+
+## Budgets and the answer ledger
+
+- `timeoutMs` defaults per kind (`DEFAULT_TIMEOUT_MS_BY_KIND`: run/continue 180s, review/rescue 240s,
+  adversarial_review 300s) and is never clamped when the caller gives one, in either direction. There is
+  no `maxTurns` default and no floor: `maxTurns` 1-2 is a deliberate answer-immediately technique.
+  Budget problems are warnings, never rejections, and both effective values are echoed on every envelope.
+- Plugin-built prompts state the budget to the delegate (`budgetNotice`) and, for read-only kinds, that
+  shell execution is unavailable (`READ_ONLY_SHELL_NOTICE`). A prompt change here is a contract change:
+  the SKILL and both READMEs must not contradict it.
+- The worker writes `<id>.final.txt` (append-only answer text) and `<id>.summary.json` (stream facts)
+  as the stream arrives. `JobStore.result()` reads that ledger; `grok_status` reads the summary alone
+  for progress. Any new per-job artifact must be added to **both** the strict pre-marker layout
+  allowlist and `cleanupExpiredJobs`, or `ensure()` will reject a real state directory.
+- Every flush consumes a delta from memory before it is durable, so a failed write must either put the
+  delta back or mark its artifact untrusted — never both dropped. `StreamCapture.markDirty` covers the
+  raw logs and `StreamLedger.restoreText` covers the answer: it re-queues the consumed text *and* sets
+  `ledgerWriteFailed`, which `readStreamProgress` treats exactly like `ledgerTruncated` so readers
+  re-parse instead of serving a file that may be short a chunk. Losing text silently here is the only
+  way the ledger and the fallback re-parse can disagree, and it would surface as a truncated answer
+  reported with `resultComplete: true`.
+- `JobStore.status()` is destructive: it reaps a job whose heartbeat is stale. The threshold is 10s, a
+  stale reading must be confirmed a second time, and observed ledger progress vetoes the reap. Any
+  change here must keep all three, and the `grok_status` description must keep saying the tool can reap.
 
 ## Background finality
 
@@ -59,13 +94,77 @@ Streaming lines may contain non-JSON diagnostics. The parser accepts JSON events
 
 1. process status `succeeded`;
 2. non-empty text;
-3. an `end` event with `stopReason: "EndTurn"`;
+3. an `end` event whose normalised stop reason is not a cancellation;
 4. no structured stream error;
-5. no output truncation.
+5. no *text* truncation: `record.textTruncated`, set only when the capture window evicted characters
+   that came from `text` events. `outputTruncated` alone — the shared window overflowing, which is
+   normally the 84.6 % of a stream that is tool echo — only adds a warning and cannot veto a result;
+6. for `kind: review` and `kind: adversarial_review`, at least one tool call. A verdict with
+   `toolCallCount === 0` inspected nothing, so it is reported as `no_evidence_review` with
+   `evidenceLevel: "none"` and never as a completed review (X2).
+
+`normalizeStopReason` lowercases the raw value and strips every non-letter, so `EndTurn`, `end_turn`, and `END-TURN` are one fact; `cancelled` and `canceled` are accepted spellings of the other. An unrecognised stop reason on a stream that ended with non-empty text fails **open**: the result is complete, `stopReasonRecognised` is false, and `outputSummary.warnings` names the raw value. The exact-match rule that shipped in 0.2.1 is what made every real Grok 1.0.x completion look incomplete.
 
 Only then is `resultComplete` true. Codex still verifies the result against real workspace files.
 
-An end event with `stopReason: "Cancelled"` remains `cancelled_partial` and foreground tools return `cancelled_output`. A `max_turns_reached` stream event is a typed retryable failure; callers should narrow the target or increase `maxTurns`. Both paths retain the Grok session ID, request ID, stop reason, bounded stderr, and partial text for diagnosis or continuation.
+An end event whose normalised stop reason is a cancellation remains `cancelled_partial` and foreground tools return `cancelled_output`; a vendor `cancelled` stop reason is stored as a `cancelled` job, never as `succeeded`. A `max_turns_reached` stream event is a typed retryable failure. The remedy the runtime prints (`CONTINUE_WITHOUT_TOOLS_REMEDY`) is to continue the same session with `maxTurns: 1` and a prompt to stop using tools and emit the final answer — not to narrow the target or raise `maxTurns` — and it is reachable as the `recovery.suggested` call on every non-complete envelope. Both paths retain the Grok session ID, request ID, stop reason, bounded stderr, and partial text for diagnosis or continuation. Guidance text lives in `grok-cli.ts` / `result-parser.ts`; the READMEs and `skills/grok/SKILL.md` must not tell a caller something the error message contradicts.
+
+The machine-readable handle must not disagree with them either. `recovery.suggested` names the same
+primitive the prose names — `grok_finalize`, the value `grok_check` publishes as
+`contract.recoveryTool` — and `recovery.fallback` spells the identical call out for a caller that only
+speaks `grok_continue`. Neither may ask for a shortened answer while the typed messages promise a
+complete one; the "under N words" prompt that shipped in the first 0.3.0 draft is the defect this rule
+exists to prevent (X6).
+
+`outputSummary.shellApprovalBlocked` and the `permission_denied_headless` code it drives require an
+**enforced read-only** job (`record.readOnly`, or the kind for records written before 0.3.0). A
+mutable run that used the shell and then ended `cancelled` is a plain `cancelled_output` (X1). Both
+that code and `no_evidence_review` are written onto the job record by the worker, not only raised on
+the foreground wait path, because the read-only kinds default to `background: true` (X2).
+
+Every classification that names a Grok session must survive a run that could not be given one up
+front: the worker writes the session id it learned from the `end` event or from the CLI's
+`session_id=` stderr line back onto the record at completion, and `findSessionOrigin` /
+`grok_finalize` fall back to the stream summary for older records (X3/X4, SPEC §D M8).
+
+An envelope has two human-readable fields, `error.message` and `outputSummary.guidance`, and they must not disagree. `timeout`, `terminated` and `max_turns_reached` are one class — a live session that never got to answer — so both fields come from `grokFailureMessage(code)`. A wall-clock timeout emits no stream event, so its guidance is derived from the stored `error.code`, not from the stream. No guidance may tell a caller to narrow the target, raise `maxTurns`, or rerun the task; that includes the fallback for an unclassified failure. The guidance for an in-flight job states when cancelling is warranted (`waitingForAuth`, or no event movement for 45 s) rather than suggesting a cancel, matching the tool descriptions (X7).
+
+## Failure classification
+
+Process teardown after the Grok CLI exits — killing the launcher tree, awaiting prompt delivery and
+stream close, flushing logs — is wrapped in its own `try`/`catch`. A teardown exception is recorded as
+`error.details.teardownError` and never replaces the outcome, because the normal path is the only place
+that knows the run hit its wall clock. Skipping it is what turned 29 recorded timeouts into
+`worker_error` with `exitCode: null` and `signal: null`.
+
+If something still throws, the worker classifies from its own scope flags rather than defaulting:
+`timedOut` gives `timeout` (message ends `(teardown failed).`), `cancelRequested` gives `cancelled`,
+and only an otherwise unexplained failure stays `worker_error`. Every one of those carries
+`details: { phase, errorName, errorMessage, errnoCode, stackTail, teardownError }`, bounded to 500 and
+1,000 characters.
+
+The worker's own stderr goes to `<id>.worker.log` (`0600`) instead of `/dev/null`, so a worker that dies
+outright still leaves evidence; `JobStore.status()` attaches its tail to `worker_unavailable`. The file
+is in the strict pre-marker layout allowlist and in `cleanupExpiredJobs` — a new artifact name missing
+from either would make `ensure()` reject a real state directory.
+
+These diagnostics are OS text that `toPublicJob` copies straight into public envelopes, so every
+free-form field (`errorMessage`, `stackTail`, `teardownError`, `workerLogTail`) passes through
+`JobStore.redactDiagnostics` (`src/redact.ts`) **before it is persisted**: the state directory becomes
+`<state>`, the install directory `<plugin>`, the home directory `<home>`. Any new free-form diagnostic
+field must go through the same redactor, or docs/privacy.md stops being true.
+
+`outputSummary.filesInspected` is such a field: the paths in it are chosen by Grok, and the recorded
+delegates opened `~/.grok/skills/pua/SKILL.md`, so `summarizeGrokOutput` takes a `PathRedactor` and
+applies it as each path is collected. `JobStore.result()` and the worker pass their store's redactor;
+a direct parser caller gets the home-directory fallback (`defaultDiagnosticRedactor`). `skillsLoaded`
+needs no redaction because it stores the extracted skill name, not the path it came from.
+
+That redactor is wrapped in `exemptWorkspacePaths(redact, record.cwd)` first, so a path inside the job's
+own workspace is returned verbatim. Without it, `<home>` rewrites the caller's files as soon as the
+workspace sits under the home directory — the normal layout — and `filesInspected` stops being usable as
+the evidence record it exists to be. The exemption matches a whole-path prefix and is therefore only for
+collected path values, never for free-form prose; the free-form diagnostics keep the unwrapped redactor.
 
 ## Local upgrade loop
 

@@ -1,5 +1,225 @@
-import type { JobOutputSummary, JobRecord, PluginErrorInfo } from "./types.js";
-import { classifyGrokErrorText, grokFailureMessage, isRetryableGrokFailure } from "./grok-cli.js";
+import { isAbsolute, relative, resolve, sep } from "node:path";
+import { jobWasReadOnly, type JobOutputSummary, type JobRecord, type PluginErrorInfo } from "./types.js";
+import {
+  CONTINUE_WITHOUT_TOOLS_REMEDY,
+  classifyGrokErrorText,
+  grokFailureDetails,
+  grokFailureMessage,
+  isRetryableGrokFailure
+} from "./grok-cli.js";
+import { defaultDiagnosticRedactor, exemptWorkspacePaths, type PathRedactor } from "./redact.js";
+
+/** Grok has shipped both `EndTurn` and `end_turn`; compare on a case/separator-free form. */
+export function normalizeStopReason(value: string | undefined): string {
+  return (value ?? "").toLowerCase().replace(/[^a-z]/g, "");
+}
+
+/**
+ * GPC-06 / GK5. Both remedies name the permission mode, because "narrow the target" — the sentence
+ * these replace — is unrelated to the observed cause: the read-only session auto-refuses shell
+ * execution, and the delegate has no way to produce `git diff` output for itself.
+ */
+export const INLINE_COMMAND_OUTPUT_REMEDY =
+  "Grok asked for a tool this read-only session refuses. Inline the required command output " +
+  "(diff, test log, command result) into the target and rerun, or continue the session with a prompt " +
+  "that supplies it. Do not widen permissions and do not treat a verdict reached without that evidence " +
+  "as a review. Codex must still verify every finding against the workspace.";
+
+/**
+ * X7: 26 of 43 recorded cancels fired before the median completion time for the kind, because an
+ * in-flight envelope told the caller to cancel and narrow. The tool descriptions now say the
+ * opposite; this is the same rule for callers that read the envelope instead.
+ */
+export const STILL_RUNNING_GUIDANCE =
+  "Grok is still running. Poll grok_status (cheap progress: textChars, eventCounts, lastEventAt) and " +
+  "let it reach timeoutMs. Do not cancel before then unless job.waitingForAuth is true or " +
+  "eventCounts/lastEventAt have not moved for more than 45s. Typical wall time on this machine: " +
+  "continue ~62s, run ~129s, review ~171s, adversarial_review ~223s (median); cancelling earlier " +
+  "throws away a run that was still working and pays the whole budget again on the rerun.";
+
+/**
+ * The three ends that leave a session alive and unanswered. Each recovers through one tool-free
+ * turn, so the guidance for them is the same sentence the typed error carries (GK4 / GPC-05.4).
+ */
+const CONTINUABLE_FAILURE_CODES = new Set(["timeout", "terminated", "max_turns_reached"]);
+
+export const SHELL_APPROVAL_REMEDY =
+  "The turn was cancelled because a shell command needed approval in plan mode, not because the target " +
+  "was too wide. Inline the required command output into the target, or continue the session with " +
+  "\"do not use tools\". Narrowing the target does not address this.";
+
+/**
+ * X2: the one sentence for a verdict reached without opening anything. Shared by the worker (which
+ * classifies the background path) and the foreground error so the two cannot drift.
+ */
+export const NO_EVIDENCE_REVIEW_REMEDY =
+  "Grok returned a verdict without making a single tool call, so nothing was inspected. " +
+  "Inline the evidence into the target and rerun, or continue the session for the file:line " +
+  "evidence behind each claim. The text is available through grok_result.";
+
+const NORMAL_COMPLETION_STOP_REASONS = new Set(["endturn"]);
+const CANCELLED_STOP_REASONS = new Set(["cancelled", "canceled"]);
+/** 26 of 64 recorded "successful" answers were shorter than this. */
+const THIN_EVIDENCE_TEXT_CHARS = 400;
+
+/**
+ * stdout only carries the session id inside the `end` event, which is exactly the event a killed or
+ * timed-out run never emits. Grok also prints `session_id=<uuid>` to stderr on tool errors, so that
+ * channel is a free fallback for the runs that most need a continuation handle.
+ */
+export function sessionIdFromStderr(stderr: string): string | undefined {
+  return /session_id=([0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12})/i.exec(stderr)?.[1];
+}
+
+/**
+ * GPC-04: the failure classifier is a substring matcher, so feeding it up to 1MB of Grok's own
+ * review prose made "forbidden", "unauthorized", and "not logged in" — ordinary words in a security
+ * review — decide the error code. Only vendor-emitted error events belong on that input face.
+ */
+export function errorEventText(stdout: string): string {
+  const messages: string[] = [];
+  for (const line of stdout.split(/\r?\n/)) {
+    if (!line.trim()) continue;
+    let parsed: unknown;
+    try {
+      parsed = JSON.parse(line);
+    } catch {
+      continue;
+    }
+    const event = nestedRecord(parsed);
+    if (!event) continue;
+    const type = stringValue(event.type);
+    if (type !== "error" && type !== "max_turns_reached" && event.error === undefined) continue;
+    if (type === "max_turns_reached") {
+      messages.push("max_turns_reached");
+      continue;
+    }
+    const raw = event.error ?? event.message ?? event.data;
+    if (raw === undefined) continue;
+    messages.push(typeof raw === "string" ? raw : JSON.stringify(raw));
+  }
+  return messages.join("\n");
+}
+
+/**
+ * X1: a headless delegation that spends its first turns reading `~/.grok/skills/pua/SKILL.md` is
+ * burning the budget the task needed. 57 of 128 recorded runs did exactly that, so the loads are
+ * counted and surfaced instead of being invisible.
+ */
+/** A persona directory the delegate chose to enter, wherever it lives. */
+const SKILL_DIRECTORY_PATTERN = /(?:\.grok|\.claude|\.codex|opencode)\/skills\/([A-Za-z0-9_.:-]+)/g;
+/**
+ * M3: the second rule used to be the bare `<name>/SKILL.md`, which matches the reviewed repository's
+ * own bundled skill — this repository is a direct hit — so reviewing a plugin repo reported the
+ * target's files as a persona the delegate had loaded, and warned about budget it never spent.
+ * A file the delegate went outside the workspace to read is the evidence X1 is about, so the path
+ * must be absolute (a relative one is by definition inside the workspace) and outside `record.cwd`.
+ */
+const SKILL_FILE_PATTERN = /(?<![A-Za-z0-9_.:~\/-])(~?\/[A-Za-z0-9_.:\-\/]*?([A-Za-z0-9_.:-]+)\/SKILL\.md)/g;
+
+function isWithinWorkspace(workspaceDir: string | undefined, path: string): boolean {
+  if (!workspaceDir) return false;
+  const relativePath = relative(resolve(workspaceDir), resolve(path));
+  return relativePath === "" || (!relativePath.startsWith(`..${sep}`) && relativePath !== ".." && !isAbsolute(relativePath));
+}
+
+function collectSkillLoads(line: string, into: Set<string>, workspaceDir?: string): void {
+  SKILL_DIRECTORY_PATTERN.lastIndex = 0;
+  for (let match = SKILL_DIRECTORY_PATTERN.exec(line); match; match = SKILL_DIRECTORY_PATTERN.exec(line)) {
+    const name = match[1];
+    if (name && name !== "skills") into.add(name);
+  }
+  SKILL_FILE_PATTERN.lastIndex = 0;
+  for (let match = SKILL_FILE_PATTERN.exec(line); match; match = SKILL_FILE_PATTERN.exec(line)) {
+    const [, path, name] = match;
+    if (!name || name === "skills") continue;
+    if (path.startsWith("/") && isWithinWorkspace(workspaceDir, path)) continue;
+    into.add(name);
+  }
+}
+
+/**
+ * X2: 30 of 64 `succeeded` review jobs made zero tool calls — a verdict from a reviewer that never
+ * opened a file. Recorded streams give every tool event a `toolCallId`, so unique ids are the
+ * count; a stream that only carries anonymous tool events still proves the calls happened, so the
+ * event count is the fallback. Either way the zero/non-zero distinction is exact.
+ */
+function toolCallIdOf(event: Record<string, unknown>): string | undefined {
+  const data = nestedRecord(event.data);
+  return (
+    stringValue(event.toolCallId) ??
+    stringValue(event.tool_call_id) ??
+    stringValue(event.id) ??
+    stringValue(data?.toolCallId) ??
+    stringValue(data?.id)
+  );
+}
+
+const FILE_PATH_KEYS = new Set(["path", "file", "file_path", "filePath", "filename", "fileName", "uri"]);
+
+/**
+ * GPC-06: `--permission-mode plan` auto-refuses shell execution, but none of the three read-only
+ * prompts ever said so, so Grok tried anyway and stopped. The refusal is only visible as this
+ * sentence inside a `tool_call_update` payload, and it was never counted anywhere.
+ */
+const DENIED_TOOL_PATTERN = /cancelled the execution for tool[:\s]+([A-Za-z0-9_.:-]+)/i;
+const SHELL_TOOL_PATTERN = /(?:run_terminal_command|terminal|shell|bash)/i;
+const TOOL_NAME_KEYS = ["name", "toolName", "tool_name", "tool"] as const;
+
+function toolNameOf(event: Record<string, unknown>): string | undefined {
+  const data = nestedRecord(event.data);
+  for (const key of TOOL_NAME_KEYS) {
+    const value = stringValue(event[key]) ?? stringValue(data?.[key]);
+    if (value) return value;
+  }
+  return undefined;
+}
+
+/**
+ * The paths here are chosen by Grok, not by the caller: the recorded delegates opened
+ * `~/.grok/skills/pua/SKILL.md` and `~/.claude/skills/using-superpowers/SKILL.md`, so home-directory
+ * locations outside the workspace routinely land in this public array. Every free-form diagnostic
+ * field goes through the redactor before it leaves the process (docs/privacy.md), and redacting on
+ * insertion also keeps the de-duplication working on the value that is actually returned.
+ *
+ * The redactor handed in here is wrapped by `exemptWorkspacePaths` first: `<home>` would otherwise
+ * swallow the caller's own workspace whenever it lives under the home directory — the normal layout —
+ * and an array of `<home>/…` strings cannot be resolved back to the files the review claims to have
+ * read, which is the whole purpose of the field.
+ */
+function collectInspectedFiles(value: unknown, into: Set<string>, redact: PathRedactor, depth = 0): void {
+  if (depth > 6 || into.size > 200) return;
+  if (Array.isArray(value)) {
+    for (const entry of value) collectInspectedFiles(entry, into, redact, depth + 1);
+    return;
+  }
+  const record = nestedRecord(value);
+  if (!record) return;
+  for (const [key, entry] of Object.entries(record)) {
+    if (FILE_PATH_KEYS.has(key)) {
+      const path = stringValue(entry);
+      if (path && path.length <= 4_096) into.add(redact(path));
+      continue;
+    }
+    collectInspectedFiles(entry, into, redact, depth + 1);
+  }
+}
+
+function turnCountOf(event: Record<string, unknown>): number | undefined {
+  const data = nestedRecord(event.data);
+  const usage = nestedRecord(event.usage) ?? nestedRecord(data?.usage);
+  for (const candidate of [
+    event.num_turns,
+    event.numTurns,
+    data?.num_turns,
+    data?.numTurns,
+    usage?.num_turns,
+    usage?.numTurns
+  ]) {
+    if (typeof candidate === "number" && Number.isFinite(candidate)) return candidate;
+  }
+  return undefined;
+}
 
 function previewText(text: string): string {
   const singleLine = text.replace(/\s+/g, " ").trim();
@@ -39,92 +259,297 @@ function streamErrorFrom(event: Record<string, unknown>): PluginErrorInfo | unde
   const message = typeof raw === "string" ? raw : JSON.stringify(raw);
   const code = classifyGrokErrorText(message);
   const publicCode = code === "unknown" ? "cli_stream_error" : code;
+  const details = grokFailureDetails(code);
   return {
     code: publicCode,
     message: code === "unknown" ? "Grok emitted an unclassified streaming error event." : grokFailureMessage(code),
-    retryable: code === "unknown" || isRetryableGrokFailure(code)
+    retryable: code === "unknown" || isRetryableGrokFailure(code),
+    ...(details ? { details } : {})
   };
+}
+
+/**
+ * GPC-03b: the facts a single pass over the stream yields. Splitting them out from the derivation
+ * below lets the worker collect them **once, incrementally**, persist them next to the job, and let
+ * `JobStore.result()` answer from that ledger instead of re-parsing up to 4MB of raw stream on each
+ * of the 656 recorded `grok_result` calls. Both producers share `observeStreamLine`, so the ledger
+ * and the fallback re-parse cannot drift apart.
+ */
+export type StreamFacts = {
+  eventCounts: Record<string, number>;
+  /** Concatenated `text`-event payloads: the answer, and nothing else. */
+  finalText: string;
+  textChars: number;
+  grokSessionId?: string;
+  requestId?: string;
+  stopReason?: string;
+  sawEnd: boolean;
+  thoughtEventCount: number;
+  textEventCount: number;
+  toolCallCount: number;
+  toolCallIds: string[];
+  toolEventCount: number;
+  filesInspected: string[];
+  skillsLoaded: string[];
+  deniedToolCalls: { name: string; count: number }[];
+  lastToolName?: string;
+  turnsUsed?: number;
+  /** Wall-clock time of the last observed event; only the incremental producer can know it. */
+  lastEventAt?: string;
+  streamError?: PluginErrorInfo;
+};
+
+export type MutableStreamFacts = Omit<
+  StreamFacts,
+  "finalText" | "toolCallIds" | "filesInspected" | "skillsLoaded" | "deniedToolCalls" | "toolCallCount"
+> & {
+  textChunks: string[];
+  toolCallIds: Set<string>;
+  filesInspected: Set<string>;
+  skillsLoaded: Set<string>;
+  deniedToolCounts: Map<string, number>;
+};
+
+export function createStreamFacts(): MutableStreamFacts {
+  return {
+    eventCounts: {},
+    textChunks: [],
+    textChars: 0,
+    sawEnd: false,
+    thoughtEventCount: 0,
+    textEventCount: 0,
+    toolEventCount: 0,
+    toolCallIds: new Set(),
+    filesInspected: new Set(),
+    skillsLoaded: new Set(),
+    deniedToolCounts: new Map()
+  };
+}
+
+/** Returns the `text`-event payload of this line, so an incremental caller can append it to a ledger. */
+export function observeStreamLine(
+  line: string,
+  facts: MutableStreamFacts,
+  redactInspectedPath: PathRedactor,
+  /** M3: the workspace the job ran in; a SKILL.md inside it belongs to the target, not to a persona. */
+  workspaceDir?: string
+): string | undefined {
+  if (!line.trim()) return undefined;
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(line);
+  } catch {
+    return undefined;
+  }
+  const event = nestedRecord(parsed);
+  if (!event) return undefined;
+
+  const eventType = stringValue(event.type) ?? "unknown";
+  facts.eventCounts[eventType] = (facts.eventCounts[eventType] ?? 0) + 1;
+  facts.streamError ??= streamErrorFrom(event);
+
+  if (eventType.startsWith("tool_call") || eventType === "tool_use") {
+    collectSkillLoads(line, facts.skillsLoaded, workspaceDir);
+    facts.toolEventCount += 1;
+    const id = toolCallIdOf(event);
+    if (id) facts.toolCallIds.add(id);
+    collectInspectedFiles(event, facts.filesInspected, redactInspectedPath);
+    const toolName = toolNameOf(event);
+    if (toolName) facts.lastToolName = toolName;
+    const denied = DENIED_TOOL_PATTERN.exec(line);
+    if (denied) {
+      const name = denied[1] ?? toolName ?? "unknown";
+      facts.deniedToolCounts.set(name, (facts.deniedToolCounts.get(name) ?? 0) + 1);
+    }
+  }
+  if (eventType === "thought") facts.thoughtEventCount += 1;
+  if (eventType === "end") {
+    facts.sawEnd = true;
+    facts.grokSessionId = eventMetadata(event, "sessionId") ?? facts.grokSessionId;
+    facts.requestId = eventMetadata(event, "requestId") ?? facts.requestId;
+    facts.stopReason = eventMetadata(event, "stopReason") ?? facts.stopReason;
+    facts.turnsUsed = turnCountOf(event) ?? facts.turnsUsed;
+  }
+  if (eventType !== "text") return undefined;
+  const text = eventText(event);
+  if (text === undefined) return undefined;
+  facts.textEventCount += 1;
+  facts.textChunks.push(text);
+  facts.textChars += text.length;
+  return text;
+}
+
+export function freezeStreamFacts(facts: MutableStreamFacts): StreamFacts {
+  const { textChunks, toolCallIds, filesInspected, skillsLoaded, deniedToolCounts, ...rest } = facts;
+  return {
+    ...rest,
+    finalText: textChunks.join(""),
+    toolCallIds: [...toolCallIds],
+    // Unique ids are the exact count; an anonymous tool stream still proves the calls happened.
+    toolCallCount: toolCallIds.size || facts.toolEventCount,
+    filesInspected: [...filesInspected],
+    skillsLoaded: [...skillsLoaded],
+    deniedToolCalls: [...deniedToolCounts.entries()].map(([name, count]) => ({ name, count }))
+  };
+}
+
+export function scanGrokStream(
+  stdout: string,
+  redactInspectedPath: PathRedactor,
+  workspaceDir?: string
+): StreamFacts {
+  const facts = createStreamFacts();
+  for (const line of stdout.split(/\r?\n/)) observeStreamLine(line, facts, redactInspectedPath, workspaceDir);
+  return freezeStreamFacts(facts);
 }
 
 export function summarizeGrokOutput(
   record: JobRecord,
   stdout: string,
   stderr = "",
-  outputTruncated = record.outputTruncated ?? false
+  outputTruncated = record.outputTruncated ?? false,
+  /** The store passes its own redactor so `<state>` and `<plugin>` are covered too. */
+  redact: PathRedactor = defaultDiagnosticRedactor(),
+  /** Pre-collected facts from the worker's ledger; when absent the raw stream is scanned. */
+  precomputed?: StreamFacts
 ): JobOutputSummary {
-  const eventCounts: Record<string, number> = {};
-  const textChunks: string[] = [];
-  let grokSessionId: string | undefined;
-  let requestId: string | undefined;
-  let stopReason: string | undefined;
-  let sawEnd = false;
-  let thoughtEventCount = 0;
-  let textEventCount = 0;
-  let streamError: PluginErrorInfo | undefined;
+  /** Files inside the workspace this job ran in are the caller's own location and stay verbatim. */
+  const redactInspectedPath = exemptWorkspacePaths(redact, record.cwd);
+  const facts = precomputed ?? scanGrokStream(stdout, redactInspectedPath, record.cwd);
+  const {
+    eventCounts,
+    grokSessionId: endSessionId,
+    requestId,
+    stopReason,
+    sawEnd,
+    thoughtEventCount,
+    textEventCount,
+    streamError,
+    skillsLoaded,
+    filesInspected,
+    toolCallCount,
+    deniedToolCalls,
+    lastToolName,
+    turnsUsed
+  } = facts;
+  let grokSessionId = endSessionId;
 
-  for (const line of stdout.split(/\r?\n/)) {
-    if (!line.trim()) continue;
-    let parsed: unknown;
-    try {
-      parsed = JSON.parse(line);
-    } catch {
-      continue;
-    }
-    const event = nestedRecord(parsed);
-    if (!event) continue;
+  const finalText = facts.finalText;
+  const warnings: string[] = [];
+  // GPC-03a: `outputTruncated` means the shared capture window overflowed, and 84.6% of that window
+  // is tool echo. Only `textTruncated` — set by the worker when evicted characters actually came
+  // from `text` events — can hide the answer, so only it may veto completeness.
+  const textTruncated = record.textTruncated ?? outputTruncated;
+  const stopReasonNormalized = normalizeStopReason(stopReason);
+  const stopReasonRecognised =
+    NORMAL_COMPLETION_STOP_REASONS.has(stopReasonNormalized) || CANCELLED_STOP_REASONS.has(stopReasonNormalized);
+  grokSessionId ??= sessionIdFromStderr(stderr);
 
-    const eventType = stringValue(event.type) ?? "unknown";
-    eventCounts[eventType] = (eventCounts[eventType] ?? 0) + 1;
-    streamError ??= streamErrorFrom(event);
-
-    if (eventType === "thought") thoughtEventCount += 1;
-    if (eventType === "text") {
-      const text = eventText(event);
-      if (text !== undefined) {
-        textEventCount += 1;
-        textChunks.push(text);
-      }
-    }
-    if (eventType === "end") {
-      sawEnd = true;
-      grokSessionId = eventMetadata(event, "sessionId") ?? grokSessionId;
-      requestId = eventMetadata(event, "requestId") ?? requestId;
-      stopReason = eventMetadata(event, "stopReason") ?? stopReason;
-    }
-  }
-
-  const finalText = textChunks.join("");
   let state: JobOutputSummary["state"];
   if (record.status === "failed" || streamError) state = "failed_partial";
   else if (record.status === "succeeded") {
-    if (stopReason === "Cancelled") state = "cancelled_partial";
+    if (CANCELLED_STOP_REASONS.has(stopReasonNormalized)) state = "cancelled_partial";
     else {
-      state = sawEnd && stopReason === "EndTurn" && finalText.trim() && !outputTruncated
-        ? "succeeded_with_text"
-        : "succeeded_without_text";
+      // Fail open on an unfamiliar vocabulary: a stream that ended with real text is a
+      // completion, and 0.2.1's exact-match rule silently destroyed those answers. The
+      // raw value plus stopReasonRecognised lets a strict caller still reject it.
+      const endedWithText = Boolean(sawEnd && finalText.trim() && !textTruncated);
+      state = endedWithText ? "succeeded_with_text" : "succeeded_without_text";
+      if (endedWithText && !stopReasonRecognised) {
+        warnings.push(`unrecognised stopReason "${stopReason ?? ""}"; treated as normal completion`);
+      }
     }
   } else if (record.status === "cancelled") state = "cancelled_partial";
   else if (record.status === "queued") state = "queued_partial";
   else state = "running_partial";
 
-  const resultComplete = state === "succeeded_with_text";
+  const evidenceLevel: JobOutputSummary["evidenceLevel"] =
+    toolCallCount === 0
+      ? "none"
+      : filesInspected.length === 0 || finalText.trim().length < THIN_EVIDENCE_TEXT_CHARS
+        ? "thin"
+        : "substantive";
+  // X2: a review verdict from a reviewer that opened nothing is an opinion. 30 of 64 succeeded jobs
+  // made zero tool calls, and the orchestrator counted those as a vote.
+  const zeroEvidenceVerdict =
+    state === "succeeded_with_text" &&
+    toolCallCount === 0 &&
+    (record.kind === "review" || record.kind === "adversarial_review");
+  if (zeroEvidenceVerdict) {
+    warnings.push("verdict produced with 0 tool calls — treat as opinion, not review");
+  }
+
+  const deniedShell = deniedToolCalls.some((entry) => SHELL_TOOL_PATTERN.test(entry.name));
+  // GK5: a `cancelled` end whose last tool activity was a shell command in an enforced read-only
+  // session was reported as "narrow the target", which is unrelated to the actual cause.
+  //
+  // X1: the enforced read-only mode is half the claim and was never checked. A mutable `grok_run`
+  // that used run_terminal_command successfully and then ended with a vendor `cancelled` stop reason
+  // has nothing to do with plan-mode approval, and reporting it as a non-retryable permission denial
+  // is the inverse of what GK5 exists for. The bare `lastToolName` is only a fallback for a stream
+  // that carried no parsable denial at all: an explicit denial list naming no shell tool is evidence
+  // against this classification, not missing evidence.
+  const shellApprovalBlocked =
+    state === "cancelled_partial" &&
+    jobWasReadOnly(record) &&
+    (deniedShell ||
+      (deniedToolCalls.length === 0 && Boolean(lastToolName && SHELL_TOOL_PATTERN.test(lastToolName))));
+
+  const resultComplete = state === "succeeded_with_text" && !zeroEvidenceVerdict;
+  // The stream's own error event wins; a stored record (the shape `grok_result` re-summarises) only
+  // carries the classified code the worker wrote, and a wall-clock timeout has no stream event at all.
+  const failureCode = streamError?.code ?? record.error?.code;
+  const continuableFailureCode =
+    failureCode && CONTINUABLE_FAILURE_CODES.has(failureCode) ? failureCode : undefined;
   let guidance: string;
-  if (resultComplete) {
+  if (shellApprovalBlocked) {
+    guidance = SHELL_APPROVAL_REMEDY;
+  } else if (deniedToolCalls.length) {
+    guidance = INLINE_COMMAND_OUTPUT_REMEDY;
+  } else if (resultComplete) {
     guidance = "Grok produced complete final text. Codex must still verify findings against the workspace before acting on them.";
-  } else if (outputTruncated) {
-    guidance = "Grok output exceeded the capture limit. Returned text is incomplete and must not be treated as a final result.";
+  } else if (zeroEvidenceVerdict) {
+    guidance =
+      "Grok returned a verdict without making a single tool call, so nothing in the workspace was inspected. " +
+      "Do not count it as a review: inline the evidence (diff, file excerpts, command output) into the target " +
+      "and rerun, or continue the session asking for the file:line evidence behind each claim.";
+  } else if (textTruncated) {
+    guidance = "Grok output exceeded the capture limit and answer text was dropped. Returned text is incomplete and must not be treated as a final result.";
   } else if (record.status === "running" || record.status === "queued") {
-    guidance = "Grok is still running. Poll result later or cancel and rerun with a narrower target.";
-  } else if (streamError?.code === "max_turns_reached") {
-    guidance = "Grok reached maxTurns before producing a final result. Narrow the target or increase maxTurns before retrying.";
+    guidance = STILL_RUNNING_GUIDANCE;
+  } else if (continuableFailureCode) {
+    // GK4 / GPC-05.4: timeout, terminated and max_turns_reached all end the same way — a session
+    // that never got to answer — and all three recover through one tool-free turn. The wording is
+    // owned by grokFailureMessage so the envelope's guidance and its error.message cannot drift.
+    guidance = grokFailureMessage(continuableFailureCode);
   } else if (record.status === "failed" || streamError) {
     guidance = stderr.trim()
       ? "Grok failed. Inspect the bounded stderr tail and correct the environment or prompt."
-      : "Grok failed without stderr. Rerun with a narrower prompt and inspect the structured error.";
+      : "Grok failed without stderr. Read error.code and error.details for the classified cause and " +
+        "recover through error.details.recovery; the captured partial text stays available from grok_result.";
   } else if (state === "cancelled_partial") {
-    guidance = "Grok was cancelled. Any returned text is partial and not a final result; continue the session or rerun with a narrower target.";
+    guidance = CONTINUE_WITHOUT_TOOLS_REMEDY(
+      "Grok was cancelled before a final result; any returned text is partial."
+    );
   } else {
-    guidance = "Grok exited successfully but did not emit non-empty text with a normal EndTurn event.";
+    guidance = "Grok exited successfully but did not emit non-empty text with a normal end event.";
+  }
+
+  if (outputTruncated && !textTruncated) {
+    warnings.push("capture window overflowed, but only non-answer stream payload was dropped");
+  }
+  if (deniedToolCalls.length) {
+    warnings.push(
+      `the read-only session refused ${deniedToolCalls
+        .map((entry) => `${entry.name} x${entry.count}`)
+        .join(", ")}; any conclusion that depended on that output rests on evidence Grok never got`
+    );
+  }
+  if (skillsLoaded.length) {
+    warnings.push(
+      `Grok loaded ${skillsLoaded.length} interactive skill file(s) (${skillsLoaded.join(", ")}) during a ` +
+        "headless delegation; that spends turn and time budget on repository bootstrap instructions."
+    );
   }
 
   return {
@@ -132,15 +557,26 @@ export function summarizeGrokOutput(
     state,
     finalText: finalText || undefined,
     outputTruncated,
+    textTruncated,
+    skillsLoaded,
+    toolCallCount,
+    filesInspected,
+    deniedToolCalls,
+    shellApprovalBlocked,
+    turnsUsed,
+    evidenceLevel,
     eventCounts,
     grokSessionId,
     requestId,
     stopReason,
+    stopReasonNormalized: stopReason === undefined ? undefined : stopReasonNormalized,
+    stopReasonRecognised,
     sawEnd,
     thoughtEventCount,
     textEventCount,
     textPreview: finalText ? previewText(finalText) : undefined,
     streamError,
-    guidance
+    guidance,
+    warnings
   };
 }

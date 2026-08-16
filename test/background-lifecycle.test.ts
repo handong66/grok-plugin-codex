@@ -85,7 +85,7 @@ describe("background lifecycle across MCP restarts", () => {
         "const promptIndex = args.indexOf('--prompt-file');",
         "const prompt = await readFile(args[promptIndex + 1], 'utf8');",
         "if (!prompt.includes('cross-process cancellation probe')) process.exit(9);",
-        `spawn(process.execPath, ['-e', ${JSON.stringify(`setTimeout(() => require('node:fs').writeFileSync(${JSON.stringify(marker)}, 'completed'), 700)`) }], { stdio: 'ignore' });`,
+        `spawn(process.execPath, ['-e', ${JSON.stringify(`setTimeout(() => require('node:fs').writeFileSync(${JSON.stringify(marker)}, 'completed'), 1500)`) }], { stdio: 'ignore' });`,
         "console.log(JSON.stringify({ type: 'text', data: 'working before restart' }));",
         "setTimeout(() => { console.log(JSON.stringify({ type: 'text', data: 'late result' })); console.log(JSON.stringify({ type: 'end', sessionId: 's1' })); }, 5000);"
       ].join("\n")
@@ -105,14 +105,14 @@ describe("background lifecycle across MCP restarts", () => {
 
     const second = await createClient(env, workspace);
     await waitFor(
-      () => call(second, "grok_result", { jobId }),
+      () => call(second, "grok_result", { jobId, includeRawTail: true }),
       (data) => data.stdoutTail.includes("working before restart")
     );
     const cancelled = await call(second, "grok_cancel", { jobId });
     expect(cancelled.job.status).toBe("cancelled");
-    await new Promise((resolvePromise) => setTimeout(resolvePromise, 900));
+    await new Promise((resolvePromise) => setTimeout(resolvePromise, 1_700));
 
-    const result = await call(second, "grok_result", { jobId });
+    const result = await call(second, "grok_result", { jobId, includeRawTail: true });
     expect(result.resultComplete).toBe(false);
     expect(result.outputSummary.state).toBe("cancelled_partial");
     expect(existsSync(marker)).toBe(false);
@@ -136,14 +136,16 @@ describe("background lifecycle across MCP restarts", () => {
       join(runtimeDir, "fast-grok.mjs"),
       [
         "#!/usr/bin/env node",
+        "import { readFile } from 'node:fs/promises';",
         "import { spawn } from 'node:child_process';",
         "const args = process.argv.slice(2);",
         "if (args[0] === '--version') { console.log('grok 0.2.93'); process.exit(0); }",
         "if (args[0] === '--help') { console.log('--prompt-file --output-format streaming-json --permission-mode plan --no-subagents --disable-web-search'); process.exit(0); }",
+        "await readFile(args[args.indexOf('--prompt-file') + 1], 'utf8');",
         `spawn(process.execPath, ['-e', ${JSON.stringify(`setTimeout(() => require('node:fs').writeFileSync(${JSON.stringify(marker)}, 'completed'), 700)`) }], { stdio: 'ignore' }).unref();`,
         "setTimeout(() => {",
         "  console.log(JSON.stringify({ type: 'text', data: 'complete after restart' }));",
-        "  console.log(JSON.stringify({ type: 'end', sessionId: 's2', stopReason: 'EndTurn' }));",
+        "  console.log(JSON.stringify({ type: 'end', sessionId: 's2', stopReason: 'end_turn' }));",
         "}, 100);"
       ].join("\n")
     );
@@ -162,7 +164,7 @@ describe("background lifecycle across MCP restarts", () => {
 
     const second = await createClient(env, workspace);
     const result = await waitFor(
-      () => call(second, "grok_result", { jobId }),
+      () => call(second, "grok_result", { jobId, includeRawTail: true }),
       (data) => data.resultComplete === true
     );
 
@@ -184,10 +186,12 @@ describe("background lifecycle across MCP restarts", () => {
       join(runtimeDir, "timeout-grok.mjs"),
       [
         "#!/usr/bin/env node",
+        "import { readFile } from 'node:fs/promises';",
         "import { spawn } from 'node:child_process';",
         "const args = process.argv.slice(2);",
         "if (args[0] === '--version') { console.log('grok 0.2.93'); process.exit(0); }",
         "if (args[0] === '--help') { console.log('--prompt-file --output-format streaming-json --permission-mode plan --no-subagents --disable-web-search'); process.exit(0); }",
+        "await readFile(args[args.indexOf('--prompt-file') + 1], 'utf8');",
         `spawn(process.execPath, ['-e', ${JSON.stringify(`setTimeout(() => require('node:fs').writeFileSync(${JSON.stringify(marker)}, 'completed'), 700)`) }], { stdio: 'ignore' });`,
         "console.log(JSON.stringify({ type: 'text', data: 'partial before timeout' }));",
         "setTimeout(() => console.log(JSON.stringify({ type: 'end', sessionId: 'late' })), 5000);"
@@ -204,7 +208,7 @@ describe("background lifecycle across MCP restarts", () => {
     const jobId = started.job.id as string;
 
     const result = await waitFor(
-      () => call(client, "grok_result", { jobId }),
+      () => call(client, "grok_result", { jobId, includeRawTail: true }),
       (data) => data.job.status === "failed"
     );
     await new Promise((resolvePromise) => setTimeout(resolvePromise, 800));
@@ -225,13 +229,15 @@ describe("background lifecycle across MCP restarts", () => {
       join(runtimeDir, "orphan-grok.mjs"),
       [
         "#!/usr/bin/env node",
+        "import { readFile } from 'node:fs/promises';",
         "import { spawn } from 'node:child_process';",
         "const args = process.argv.slice(2);",
         "if (args[0] === '--version') { console.log('grok 0.2.93'); process.exit(0); }",
         "if (args[0] === '--help') { console.log('--prompt-file --output-format streaming-json --permission-mode plan --no-subagents --disable-web-search'); process.exit(0); }",
-        `spawn(process.execPath, ['-e', ${JSON.stringify(`setTimeout(() => require('node:fs').writeFileSync(${JSON.stringify(marker)}, 'completed'), 8000)`) }], { stdio: 'ignore' });`,
+        "await readFile(args[args.indexOf('--prompt-file') + 1], 'utf8');",
+        `spawn(process.execPath, ['-e', ${JSON.stringify(`setTimeout(() => require('node:fs').writeFileSync(${JSON.stringify(marker)}, 'completed'), 20000)`) }], { stdio: 'ignore' });`,
         "console.log(JSON.stringify({ type: 'text', data: 'orphan probe running' }));",
-        "setTimeout(() => console.log(JSON.stringify({ type: 'end', sessionId: 'late-orphan' })), 12000);"
+        "setTimeout(() => console.log(JSON.stringify({ type: 'end', sessionId: 'late-orphan' })), 25000);"
       ].join("\n")
     );
     const env = { ...process.env, GROK_BIN: grokBin, GROK_PLUGIN_STATE_DIR: stateDir };
@@ -252,8 +258,10 @@ describe("background lifecycle across MCP restarts", () => {
 
     process.kill(running.workerPid, "SIGKILL");
     try {
-      await new Promise((resolvePromise) => setTimeout(resolvePromise, 5_300));
-      const result = await call(client, "grok_result", { jobId });
+      // GPC-M3 raised the staleness threshold to 10s and requires a confirmed second reading, so a
+      // reap is only expected after that budget, not after the old 5s one.
+      await new Promise((resolvePromise) => setTimeout(resolvePromise, 11_000));
+      const result = await call(client, "grok_result", { jobId, includeRawTail: true });
       expect(result.job.status).toBe("failed");
       expect(result.job.error.code).toBe("worker_unavailable");
       await new Promise((resolvePromise) => setTimeout(resolvePromise, 3_000));
@@ -277,9 +285,11 @@ describe("background lifecycle across MCP restarts", () => {
       join(runtimeDir, "foreground-grok.mjs"),
       [
         "#!/usr/bin/env node",
+        "import { readFile } from 'node:fs/promises';",
         "const args = process.argv.slice(2);",
         "if (args[0] === '--version') { console.log('grok 0.2.93'); process.exit(0); }",
         "if (args[0] === '--help') { console.log('--prompt-file --output-format streaming-json --permission-mode plan --no-subagents --disable-web-search'); process.exit(0); }",
+        "await readFile(args[args.indexOf('--prompt-file') + 1], 'utf8');",
         "setTimeout(() => {",
         "  console.log(JSON.stringify({ type: 'text', data: 'foreground worker completed' }));",
         "  console.log(JSON.stringify({ type: 'end', sessionId: 'foreground-session' }));",
@@ -292,7 +302,12 @@ describe("background lifecycle across MCP restarts", () => {
       .callTool(
         {
           name: "grok_run",
-          arguments: { cwd: workspace, prompt: "foreground crash cleanup probe", timeoutMs: 5_000 }
+          arguments: {
+            cwd: workspace,
+            prompt: "foreground crash cleanup probe",
+            background: false,
+            timeoutMs: 5_000
+          }
         },
         undefined,
         { timeout: 10_000 }
@@ -325,11 +340,13 @@ describe("background lifecycle across MCP restarts", () => {
       join(runtimeDir, "cancel-after-worker-loss-grok.mjs"),
       [
         "#!/usr/bin/env node",
+        "import { readFile } from 'node:fs/promises';",
         "import { spawn } from 'node:child_process';",
         "const args = process.argv.slice(2);",
         "if (args[0] === '--version') { console.log('grok 0.2.93'); process.exit(0); }",
         "if (args[0] === '--help') { console.log('--prompt-file --output-format streaming-json --permission-mode plan --no-subagents --disable-web-search'); process.exit(0); }",
-        `spawn(process.execPath, ['-e', ${JSON.stringify(`setTimeout(() => require('node:fs').writeFileSync(${JSON.stringify(marker)}, 'completed'), 700)`) }], { stdio: 'ignore' });`,
+        "await readFile(args[args.indexOf('--prompt-file') + 1], 'utf8');",
+        `spawn(process.execPath, ['-e', ${JSON.stringify(`setTimeout(() => require('node:fs').writeFileSync(${JSON.stringify(marker)}, 'completed'), 1500)`) }], { stdio: 'ignore' });`,
         "console.log(JSON.stringify({ type: 'text', data: 'ready for lost-worker cancel' }));",
         "setTimeout(() => console.log(JSON.stringify({ type: 'end', sessionId: 'late-cancel' })), 5000);"
       ].join("\n")
@@ -349,7 +366,7 @@ describe("background lifecycle across MCP restarts", () => {
       (record) => record.status === "running" && typeof record.pid === "number" && typeof record.workerPid === "number"
     );
     await waitFor(
-      () => call(client, "grok_result", { jobId }),
+      () => call(client, "grok_result", { jobId, includeRawTail: true }),
       (data) => data.stdoutTail.includes("ready for lost-worker cancel")
     );
 
@@ -357,7 +374,7 @@ describe("background lifecycle across MCP restarts", () => {
     try {
       const cancelled = await call(client, "grok_cancel", { jobId });
       expect(cancelled.job.status).toBe("cancelled");
-      await new Promise((resolvePromise) => setTimeout(resolvePromise, 900));
+      await new Promise((resolvePromise) => setTimeout(resolvePromise, 1_700));
       expect(existsSync(marker)).toBe(false);
     } finally {
       try {
@@ -378,11 +395,13 @@ describe("background lifecycle across MCP restarts", () => {
       join(runtimeDir, "launcher-loss-grok.mjs"),
       [
         "#!/usr/bin/env node",
+        "import { readFile } from 'node:fs/promises';",
         "import { spawn } from 'node:child_process';",
         "const args = process.argv.slice(2);",
         "if (args[0] === '--version') { console.log('grok 0.2.93'); process.exit(0); }",
         "if (args[0] === '--help') { console.log('--prompt-file --output-format streaming-json --permission-mode plan --no-subagents --disable-web-search'); process.exit(0); }",
-        `spawn(process.execPath, ['-e', ${JSON.stringify(`setTimeout(() => require('node:fs').writeFileSync(${JSON.stringify(marker)}, 'completed'), 700)`) }], { stdio: 'ignore' });`,
+        "await readFile(args[args.indexOf('--prompt-file') + 1], 'utf8');",
+        `spawn(process.execPath, ['-e', ${JSON.stringify(`setTimeout(() => require('node:fs').writeFileSync(${JSON.stringify(marker)}, 'completed'), 1500)`) }], { stdio: 'ignore' });`,
         "console.log(JSON.stringify({ type: 'text', data: 'ready for launcher loss' }));",
         "setTimeout(() => console.log(JSON.stringify({ type: 'end', sessionId: 'late-launcher' })), 5000);"
       ].join("\n")
@@ -402,17 +421,17 @@ describe("background lifecycle across MCP restarts", () => {
       (record) => record.status === "running" && typeof record.pid === "number"
     );
     await waitFor(
-      () => call(client, "grok_result", { jobId }),
+      () => call(client, "grok_result", { jobId, includeRawTail: true }),
       (data) => data.stdoutTail.includes("ready for launcher loss")
     );
 
     process.kill(running.pid, "SIGKILL");
     const result = await waitFor(
-      () => call(client, "grok_result", { jobId }),
+      () => call(client, "grok_result", { jobId, includeRawTail: true }),
       (data) => data.job.status === "failed"
     );
     expect(result.job.error.code).toBe("terminated");
-    await new Promise((resolvePromise) => setTimeout(resolvePromise, 900));
+    await new Promise((resolvePromise) => setTimeout(resolvePromise, 1_700));
     expect(existsSync(marker)).toBe(false);
   }, 15_000);
 });

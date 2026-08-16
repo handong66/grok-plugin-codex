@@ -7,9 +7,11 @@ import { join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import { promisify } from "node:util";
 import { buildWorkerEnv, discoverGrok, signalPidTree } from "./grok-cli.js";
-import { summarizeGrokOutput } from "./result-parser.js";
+import { jobDiagnosticRedactor, redactDeviceCode, type PathRedactor } from "./redact.js";
+import { summarizeGrokOutput, type StreamFacts } from "./result-parser.js";
 import {
   GrokPluginError,
+  jobWasReadOnly,
   type JobKind,
   type JobOutputSummary,
   type JobRecord,
@@ -26,9 +28,25 @@ export type JobStoreOptions = {
 
 const DEFAULT_TIMEOUT_MS = 600_000;
 const WORKER_STARTUP_GRACE_MS = 5_000;
-const WORKER_HEARTBEAT_STALE_MS = 5_000;
+/**
+ * GPC-M3: `status()` is destructive — it kills the process tree of a job whose heartbeat looks stale,
+ * and `grok_status`/`grok_result` both go through it, at up to 20Hz before GPC-09. 5s was two flush
+ * cycles away from a healthy worker under load. The threshold is now 10s, a stale verdict must be
+ * confirmed a second time after a real interval, and observed stream progress vetoes it outright.
+ */
+export const WORKER_HEARTBEAT_STALE_MS = 10_000;
+const STALE_CONFIRM_DELAY_MS = 1_000;
 const MAX_RESULT_CHARS = 100_000;
+const WORKER_LOG_TAIL_CHARS = 4_000;
 const SUMMARY_READ_CHARS = 1_000_000;
+/**
+ * X12 / FINAL Review M4: the ceiling the worker enforces when it appends to `<id>.final.txt`, and
+ * therefore the only correct size for the read that serves that file back. It used to be read with
+ * `SUMMARY_READ_CHARS` — a 1MB *tail* — so an answer between 1MB and the worker's 4MB cap came back
+ * with its opening silently removed, and `grok_result`'s `finalTextOffset` paging then described the
+ * beheaded window rather than the answer. The worker imports this constant so the two cannot drift.
+ */
+export const MAX_FINAL_TEXT_LEDGER_CHARS = 4_000_000;
 const TERMINAL_RETENTION_MS = 7 * 24 * 60 * 60 * 1_000;
 const JOB_LOCK_STALE_MS = 2_000;
 const JOB_LOCK_WAIT_MS = 5_000;
@@ -37,6 +55,8 @@ const TERMINAL_STATUSES = new Set<JobRecord["status"]>(["succeeded", "failed", "
 const JOB_ID_PATTERN = /^job_[A-Za-z0-9_-]{16,128}$/;
 const PROMPT_SOURCE_ARGS = new Set(["-p", "--single", "--prompt-file", "--prompt-json"]);
 const STATE_MARKER_CONTENT = "grok-plugin-codex-state-v2\n";
+/** Bump when the persisted stream-summary shape changes; an older file is ignored, never guessed at. */
+export const STREAM_SUMMARY_VERSION = 1;
 const execFileAsync = promisify(execFile);
 
 export function defaultJobStateDir(env: NodeJS.ProcessEnv = process.env): string {
@@ -134,7 +154,7 @@ async function isRecognizedPreMarkerStateDir(stateDir: string, stateMode: number
 
   for (const entry of jobEntries) {
     const match = entry.name.match(
-      /^(job_[A-Za-z0-9_-]{16,128})(?:\.json|\.stdout\.log|\.stderr\.log|\.heartbeat|\.cancel|\.input|\.lock)$/
+      /^(job_[A-Za-z0-9_-]{16,128})(?:\.json|\.stdout\.log|\.stderr\.log|\.worker\.log|\.final\.txt|\.summary\.json|\.summary\.json\.tmp|\.heartbeat|\.cancel|\.input|\.lock)$/
     );
     if (!match?.[1] || !validJobIds.has(match[1])) return false;
     const metadata = await lstat(join(jobsDir, entry.name)).catch(() => null);
@@ -143,7 +163,12 @@ async function isRecognizedPreMarkerStateDir(stateDir: string, stateMode: number
   return true;
 }
 
-export function toPublicJob(record: JobRecord): PublicJob {
+/**
+ * GPC-07: `progress` is the cheap half of the ledger. Without it `grok_status` could only say
+ * "running", so every status call was followed by an expensive `grok_result` to find out anything —
+ * 730 status calls against 656 result calls in the recorded window.
+ */
+export function toPublicJob(record: JobRecord, progress?: Omit<StreamFacts, "finalText">): PublicJob {
   return {
     id: record.id,
     kind: record.kind,
@@ -153,10 +178,21 @@ export function toPublicJob(record: JobRecord): PublicJob {
     finishedAt: record.finishedAt,
     timeoutMs: record.timeoutMs,
     grokSessionId: record.grokSessionId,
+    waitingForAuth: record.waitingForAuth,
     exitCode: record.exitCode,
     signal: record.signal,
     error: record.error,
-    outputTruncated: record.outputTruncated
+    outputTruncated: record.outputTruncated,
+    ...(progress
+      ? {
+          grokSessionId: record.grokSessionId ?? progress.grokSessionId,
+          textChars: progress.textChars,
+          eventCounts: progress.eventCounts,
+          lastEventAt: progress.lastEventAt,
+          toolCallCount: progress.toolCallCount,
+          deniedToolCalls: progress.deniedToolCalls
+        }
+      : {})
   };
 }
 
@@ -164,12 +200,19 @@ export class JobStore {
   readonly stateDir: string;
   readonly workerPath: string;
   readonly env: NodeJS.ProcessEnv;
+  /** Applied to every free-form diagnostic before it is persisted; see src/redact.ts. */
+  readonly redactDiagnostics: PathRedactor;
 
   constructor(options: string | JobStoreOptions = {}) {
     const normalized = typeof options === "string" ? { stateDir: options } : options;
     this.env = { ...process.env, ...(normalized.env ?? {}) };
     this.stateDir = resolve(normalized.stateDir ?? defaultJobStateDir(this.env));
     this.workerPath = normalized.workerPath ?? defaultWorkerPath(this.env);
+    this.redactDiagnostics = jobDiagnosticRedactor({
+      stateDir: this.stateDir,
+      workerPath: this.workerPath,
+      env: this.env
+    });
   }
 
   private jobsDir(): string {
@@ -213,6 +256,47 @@ export class JobStore {
   heartbeatPath(jobId: string): string {
     assertJobId(jobId);
     return join(this.jobsDir(), `${jobId}.heartbeat`);
+  }
+
+  /**
+   * GPC-03b: the answer text as an append-only ledger, so `result()` does not have to re-parse the
+   * raw stream (up to 4MB, 656 recorded calls) to find the 3.31% of it that is the answer.
+   */
+  finalTextPath(jobId: string): string {
+    assertJobId(jobId);
+    return join(this.jobsDir(), `${jobId}.final.txt`);
+  }
+
+  /** Stream facts collected incrementally by the worker; also the cheap progress source for status. */
+  summaryPath(jobId: string): string {
+    assertJobId(jobId);
+    return join(this.jobsDir(), `${jobId}.summary.json`);
+  }
+
+  /** Staging name for the atomic summary write; never read, never left behind on success. */
+  summaryTempPath(jobId: string): string {
+    return `${this.summaryPath(jobId)}.tmp`;
+  }
+
+  /**
+   * FINAL Review M5: the summary is rewritten *whole* every 25ms while a job streams, and it used to
+   * be written straight over the live path. A reader that arrived mid-write got a truncated file,
+   * `readStreamProgress` could not parse it and returned `undefined` — so `grok_status` lost its
+   * progress fields and, worse, GPC-M3's "observed progress vetoes reaping" stopped vetoing, exactly
+   * during the busiest writing. Written to a sibling and renamed: the live path is replaced, never
+   * rewritten in place, so a reader sees the whole previous summary or the whole new one.
+   */
+  async writeStreamSummary(jobId: string, contents: string): Promise<void> {
+    const temporaryPath = this.summaryTempPath(jobId);
+    await writeFile(temporaryPath, contents, { mode: 0o600 });
+    await chmod(temporaryPath, 0o600);
+    await rename(temporaryPath, this.summaryPath(jobId));
+  }
+
+  /** Private capture of the worker process's own stderr; without it a hard crash is unreadable. */
+  workerLogPath(jobId: string): string {
+    assertJobId(jobId);
+    return join(this.jobsDir(), `${jobId}.worker.log`);
   }
 
   async ensure(): Promise<void> {
@@ -452,25 +536,166 @@ export class JobStore {
       if (Number.isFinite(createdAtMs) && Date.now() - createdAtMs <= WORKER_STARTUP_GRACE_MS) return record;
     }
     if (await this.hasFreshHeartbeat(jobId)) return record;
-    await new Promise((resolvePromise) => setTimeout(resolvePromise, 25));
+    // One stale reading is not evidence: confirm it after a real interval, and let any stream event
+    // observed in between prove the run is alive even though the heartbeat write is behind.
+    const progressBefore = (await this.readStreamProgress(jobId))?.lastEventAt;
+    await new Promise((resolvePromise) => setTimeout(resolvePromise, STALE_CONFIRM_DELAY_MS));
     record = await this.read(jobId);
     if (TERMINAL_STATUSES.has(record.status) || (await this.hasFreshHeartbeat(jobId))) return record;
+    const progressAfter = (await this.readStreamProgress(jobId))?.lastEventAt;
+    if (progressAfter && progressAfter !== progressBefore) return record;
     await this.terminateOwnedProcessTree(record);
     record = await this.read(jobId);
     if (TERMINAL_STATUSES.has(record.status) || (await this.hasFreshHeartbeat(jobId))) return record;
     await this.terminateOwnedWorker(record);
     record = await this.read(jobId);
     if (TERMINAL_STATUSES.has(record.status) || (await this.hasFreshHeartbeat(jobId))) return record;
+    // Raw Node stderr from the worker names the state directory and the install path; the tail is a
+    // public field, so it is redacted before it is written into the record.
+    const workerLogTail = this.redactDiagnostics(await readTail(this.workerLogPath(jobId), WORKER_LOG_TAIL_CHARS));
     record.status = "failed";
     record.error = {
       code: "worker_unavailable",
       message: "The Grok background worker exited without recording a terminal result.",
-      retryable: true
+      retryable: true,
+      details: { phase: "worker_liveness", ...(workerLogTail.trim() ? { workerLogTail } : {}) }
     };
     record.finishedAt = new Date().toISOString();
     await rm(this.inputPath(jobId), { force: true });
     await this.write(record);
     return await this.read(jobId);
+  }
+
+  /**
+   * X3 / X4: `record.grokSessionId` is written before the worker starts only when the CLI advertises
+   * `--session-id`; otherwise the id is learned from the `end` event (or the `session_id=` the CLI
+   * prints to stderr) and the worker persists it at completion. A record written by an older build,
+   * or one whose worker died before that write, still has the id in its stream summary — so the
+   * permission lookup consults that too rather than resolving the session to "unknown" and letting
+   * `alwaysApprove` through.
+   */
+  private async recordSessionId(
+    jobId: string,
+    record: JobRecord,
+    /**
+     * N1: a record with no `grokSessionId` costs one `<id>.summary.json` read, and
+     * `findLatestSessionOrigin` calls `findSessionOrigin` once per candidate session — each of which
+     * rescans every record. Without a cache that is O(N²) small reads on the recovery path
+     * (`continueLatest`, and the degraded `grok_finalize({ cwd })`). The cache lives for one lookup.
+     */
+    cache?: Map<string, string | undefined>
+  ): Promise<string | undefined> {
+    if (record.grokSessionId) return record.grokSessionId;
+    if (cache?.has(jobId)) return cache.get(jobId);
+    const learned = (await this.readStreamProgress(jobId))?.grokSessionId;
+    cache?.set(jobId, learned);
+    return learned;
+  }
+
+  /**
+   * GPC-M2: what a session is allowed to do is decided by the job that created it, not by the
+   * arguments of the call that resumes it. A session touched by any enforced read-only job stays
+   * read-only, so an adversarial-review session cannot be continued with write permissions.
+   */
+  async findSessionOrigin(
+    grokSessionId: string,
+    sessionIdCache?: Map<string, string | undefined>
+  ): Promise<{ jobId: string; kind: JobKind; readOnly: boolean } | undefined> {
+    await this.ensure();
+    const entries = await readdir(this.jobsDir(), { withFileTypes: true }).catch(() => []);
+    let creator: { jobId: string; kind: JobKind; createdAt: number } | undefined;
+    let earliest: { jobId: string; kind: JobKind; createdAt: number } | undefined;
+    let readOnly = false;
+    for (const entry of entries) {
+      if (!entry.isFile() || !entry.name.endsWith(".json")) continue;
+      const jobId = entry.name.slice(0, -5);
+      if (!JOB_ID_PATTERN.test(jobId)) continue;
+      const record = await this.read(jobId).catch(() => null);
+      if (!record || (await this.recordSessionId(jobId, record, sessionIdCache)) !== grokSessionId) continue;
+      readOnly ||= jobWasReadOnly(record);
+      const candidate = { jobId, kind: record.kind, createdAt: Date.parse(record.createdAt) };
+      if (!earliest || !Number.isFinite(earliest.createdAt) || candidate.createdAt <= earliest.createdAt) {
+        earliest = candidate;
+      }
+      // Only a job that started the session says how it was created. A `continue` job takes its mode
+      // from this same lookup, so accepting one as the origin would let a single unverified
+      // continuation launder an unknown session into a "known mutable" one for every later call.
+      if (record.kind === "continue") continue;
+      if (!creator || !Number.isFinite(creator.createdAt) || candidate.createdAt <= creator.createdAt) {
+        creator = candidate;
+      }
+    }
+    const origin = creator ?? (readOnly ? earliest : undefined);
+    return origin ? { jobId: origin.jobId, kind: origin.kind, readOnly } : undefined;
+  }
+
+  /**
+   * GPC-M2: `continueLatest: true` names no session, so `findSessionOrigin` cannot run and the
+   * read-only inheritance was skipped entirely — `alwaysApprove` was one parameter away from
+   * resuming an enforced read-only session with write permissions. The plugin does hold cheap
+   * evidence about what the CLI is about to resume: the session it started most recently in this
+   * workspace. That is a heuristic, not a fact, so it is used to fail closed and it says so; naming
+   * an explicit `sessionId` remains the way to continue some other session.
+   */
+  async findLatestSessionOrigin(
+    cwd: string
+  ): Promise<{ jobId: string; kind: JobKind; readOnly: boolean; grokSessionId: string } | undefined> {
+    await this.ensure();
+    const workspace = resolve(cwd);
+    const entries = await readdir(this.jobsDir(), { withFileTypes: true }).catch(() => []);
+    const candidates: { grokSessionId: string; createdAt: number }[] = [];
+    // One summary read per record for the whole lookup, however many candidate sessions it walks.
+    const sessionIdCache = new Map<string, string | undefined>();
+    for (const entry of entries) {
+      if (!entry.isFile() || !entry.name.endsWith(".json")) continue;
+      const jobId = entry.name.slice(0, -5);
+      if (!JOB_ID_PATTERN.test(jobId)) continue;
+      const record = await this.read(jobId).catch(() => null);
+      if (!record || resolve(record.cwd) !== workspace) continue;
+      // X9: a named continuation that died with `session_not_found` still carries the id it *asked
+      // for* and the newest timestamp, so it shadowed the genuinely latest session — and because a
+      // `continue` job is never an origin, the lookup below then returned `undefined` and the whole
+      // fail-closed guard degraded into a warning. A session the CLI has already denied is not a
+      // candidate for "the session the CLI is about to resume".
+      if (record.error?.code === "session_not_found") continue;
+      const grokSessionId = await this.recordSessionId(jobId, record, sessionIdCache);
+      if (!grokSessionId) continue;
+      candidates.push({ grokSessionId, createdAt: Date.parse(record.createdAt) || 0 });
+    }
+    candidates.sort((a, b) => b.createdAt - a.createdAt);
+    // Resolve through the session lookup so "any job on this session was read-only" still holds, and
+    // keep walking back: the newest id that resolves to a real origin is better evidence than the
+    // newest id overall, which may belong to a session this plugin only ever continued.
+    for (const grokSessionId of new Set(candidates.map((candidate) => candidate.grokSessionId))) {
+      const origin = await this.findSessionOrigin(grokSessionId, sessionIdCache);
+      if (origin) return { ...origin, grokSessionId };
+    }
+    return undefined;
+  }
+
+  /**
+   * GK8: `session_not_found` told the caller to "list sessions and select an existing session ID",
+   * but the id it was holding was often the only handle it had. These are the sessions this plugin
+   * actually started in the same workspace, newest first — a usable candidate list, not a suggestion
+   * to go and look one up.
+   */
+  async listRecentSessionIds(cwd: string, limit = 5): Promise<string[]> {
+    await this.ensure();
+    const workspace = resolve(cwd);
+    const entries = await readdir(this.jobsDir(), { withFileTypes: true }).catch(() => []);
+    const found: { grokSessionId: string; createdAt: number }[] = [];
+    for (const entry of entries) {
+      if (!entry.isFile() || !entry.name.endsWith(".json")) continue;
+      const jobId = entry.name.slice(0, -5);
+      if (!JOB_ID_PATTERN.test(jobId)) continue;
+      const record = await this.read(jobId).catch(() => null);
+      if (!record?.grokSessionId || resolve(record.cwd) !== workspace) continue;
+      found.push({ grokSessionId: record.grokSessionId, createdAt: Date.parse(record.createdAt) || 0 });
+    }
+    return [...new Set(found.sort((a, b) => b.createdAt - a.createdAt).map((entry) => entry.grokSessionId))].slice(
+      0,
+      limit
+    );
   }
 
   async startGrokJob(params: {
@@ -480,6 +705,7 @@ export class JobStore {
     prompt: string;
     timeoutMs?: number;
     grokSessionId?: string;
+    readOnly?: boolean;
   }): Promise<JobRecord> {
     await this.ensure();
     await this.cleanupExpiredJobs();
@@ -503,17 +729,27 @@ export class JobStore {
       command: discovered.bin,
       args: [...params.args],
       grokSessionId: params.grokSessionId,
+      readOnly: params.readOnly ?? false,
       createdAt: new Date().toISOString(),
       timeoutMs: params.timeoutMs ?? DEFAULT_TIMEOUT_MS,
       processToken: randomUUID()
     };
     await this.write(record);
-    const worker = spawn(process.execPath, [this.workerPath, id], {
-      cwd: params.cwd,
-      detached: true,
-      stdio: "ignore",
-      env: buildWorkerEnv({ ...this.env, GROK_PLUGIN_STATE_DIR: this.stateDir })
-    });
+    // Keep the worker's own stderr instead of discarding it: a crashed worker used to leave nothing
+    // behind but a bare `worker_unavailable`, which cost a full log audit to diagnose.
+    const workerLog = await open(this.workerLogPath(id), "a", 0o600).catch(() => null);
+    let worker;
+    try {
+      if (workerLog) await chmod(this.workerLogPath(id), 0o600).catch(() => undefined);
+      worker = spawn(process.execPath, [this.workerPath, id], {
+        cwd: params.cwd,
+        detached: true,
+        stdio: ["ignore", "ignore", workerLog ? workerLog.fd : "ignore"],
+        env: buildWorkerEnv({ ...this.env, GROK_PLUGIN_STATE_DIR: this.stateDir })
+      });
+    } finally {
+      await workerLog?.close().catch(() => undefined);
+    }
     if (!worker.pid) {
       record.status = "failed";
       record.error = { code: "worker_spawn_error", message: "Failed to start the Grok background worker.", retryable: true };
@@ -591,23 +827,103 @@ export class JobStore {
     return await this.read(jobId);
   }
 
+  /**
+   * GPC-07: the cheap half of the ledger — one small read, no stream tail and no re-parse — so
+   * `grok_status` can say how far a run has got. Before this, `toPublicJob` carried only lifecycle
+   * fields, so 730 status calls were followed by 656 expensive `grok_result` calls to learn anything.
+   */
+  async readStreamProgress(jobId: string): Promise<Omit<StreamFacts, "finalText"> | undefined> {
+    const raw = await readFile(this.summaryPath(jobId), "utf8").catch(() => null);
+    if (!raw?.trim()) return undefined;
+    let parsed: unknown;
+    try {
+      parsed = JSON.parse(raw);
+    } catch {
+      return undefined;
+    }
+    if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) return undefined;
+    const summary = parsed as Partial<StreamFacts> & {
+      version?: number;
+      ledgerTruncated?: boolean;
+      ledgerWriteFailed?: boolean;
+    };
+    // A ledger that outgrew its cap, or one whose append failed, no longer matches `textChars`;
+    // either way the caller must re-parse rather than be served an answer that is short a chunk.
+    if (summary.version !== STREAM_SUMMARY_VERSION || summary.ledgerTruncated || summary.ledgerWriteFailed) {
+      return undefined;
+    }
+    if (!summary.eventCounts || typeof summary.eventCounts !== "object") return undefined;
+    return {
+      eventCounts: summary.eventCounts,
+      textChars: summary.textChars ?? 0,
+      grokSessionId: summary.grokSessionId,
+      requestId: summary.requestId,
+      stopReason: summary.stopReason,
+      sawEnd: Boolean(summary.sawEnd),
+      thoughtEventCount: summary.thoughtEventCount ?? 0,
+      textEventCount: summary.textEventCount ?? 0,
+      toolCallCount: summary.toolCallCount ?? 0,
+      toolCallIds: summary.toolCallIds ?? [],
+      toolEventCount: summary.toolEventCount ?? 0,
+      filesInspected: summary.filesInspected ?? [],
+      skillsLoaded: summary.skillsLoaded ?? [],
+      deniedToolCalls: summary.deniedToolCalls ?? [],
+      lastToolName: summary.lastToolName,
+      turnsUsed: summary.turnsUsed,
+      lastEventAt: summary.lastEventAt,
+      streamError: summary.streamError
+    };
+  }
+
+  /**
+   * GPC-03b: the worker's incremental ledger, when it exists and is intact. A record written before
+   * 0.3.0 — one whose answer outgrew the ledger cap, or one whose append to `<id>.final.txt` failed —
+   * returns `undefined`, and the caller falls back to the full re-parse that was the only path in
+   * 0.2.x. Serving a short ledger instead would publish a truncated answer as a complete one.
+   */
+  async readStreamFacts(jobId: string): Promise<StreamFacts | undefined> {
+    const summary = await this.readStreamProgress(jobId);
+    if (!summary) return undefined;
+    // X12: read the whole ledger, not a 1MB tail of it — the worker's own cap is the bound.
+    const finalText = await readTail(this.finalTextPath(jobId), MAX_FINAL_TEXT_LEDGER_CHARS);
+    return {
+      ...summary,
+      finalText,
+      textChars: summary.textChars || finalText.length
+    };
+  }
+
+
   async result(
     jobId: string,
     maxChars = 20_000
   ): Promise<{ record: JobRecord; stdout: string; stderr: string; outputSummary: JobOutputSummary }> {
     const record = await this.status(jobId);
     const boundedMaxChars = Math.min(Math.max(maxChars, 1), MAX_RESULT_CHARS);
+    const facts = await this.readStreamFacts(jobId);
     const [stdout, stderr, summaryStdout, summaryStderr] = await Promise.all([
       readTail(this.stdoutPath(jobId), boundedMaxChars),
       readTail(this.stderrPath(jobId), boundedMaxChars),
-      readTail(this.stdoutPath(jobId), SUMMARY_READ_CHARS),
+      // The 1MB re-read exists only for records without a ledger; with one, nothing needs it.
+      facts ? Promise.resolve("") : readTail(this.stdoutPath(jobId), SUMMARY_READ_CHARS),
       readTail(this.stderrPath(jobId), SUMMARY_READ_CHARS)
     ]);
+    // The one-time OAuth device code never leaves the private log; the sign-in URL around it does.
     return {
       record,
       stdout,
-      stderr,
-      outputSummary: summarizeGrokOutput(record, summaryStdout, summaryStderr, record.outputTruncated)
+      stderr: redactDeviceCode(stderr),
+      outputSummary: summarizeGrokOutput(
+        record,
+        summaryStdout,
+        redactDeviceCode(summaryStderr),
+        record.outputTruncated,
+        // `filesInspected` names paths Grok chose, including locations under the home directory that
+        // no caller asked about; it leaves this process through the same redactor as every other
+        // free-form diagnostic field.
+        this.redactDiagnostics,
+        facts
+      )
     };
   }
 
@@ -626,6 +942,10 @@ export class JobStore {
         rm(this.jobPath(jobId), { force: true }),
         rm(this.stdoutPath(jobId), { force: true }),
         rm(this.stderrPath(jobId), { force: true }),
+        rm(this.workerLogPath(jobId), { force: true }),
+        rm(this.finalTextPath(jobId), { force: true }),
+        rm(this.summaryPath(jobId), { force: true }),
+        rm(this.summaryTempPath(jobId), { force: true }),
         rm(this.inputPath(jobId), { force: true }),
         rm(this.heartbeatPath(jobId), { force: true }),
         rm(this.cancelPath(jobId), { force: true }),

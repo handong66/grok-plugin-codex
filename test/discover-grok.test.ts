@@ -84,7 +84,16 @@ describe("Grok CLI discovery", () => {
     const unknown = parseModelsOutput("Default model: grok-4.5");
 
     expect(unauthenticated.loggedIn).toBe(false);
-    expect(unknown.loggedIn).toBe(false);
+    // X8 / SPEC §B GK1.3: a listing that says nothing about login is not a logged-out account. The
+    // old two-state value published that silence as `false`, and grok_check wrote it straight into
+    // `authenticated`, which is the field a gate decision reads.
+    expect(unknown.loggedIn).toBe("unknown");
+  });
+
+  it("lets an explicit negative win over a positive mention in the same output", () => {
+    const conflicting = parseModelsOutput("You are logged in with grok.com.\nSession error: not authenticated.");
+
+    expect(conflicting.loggedIn).toBe(false);
   });
 
   it("classifies max-turn exhaustion separately from generic CLI failure", () => {

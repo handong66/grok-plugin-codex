@@ -2,6 +2,8 @@
 import { chmod, mkdir, readFile, rm, writeFile } from "node:fs/promises";
 import { build } from "esbuild";
 
+const packageVersion = JSON.parse(await readFile("package.json", "utf8")).version;
+
 const outdir = "plugins/grok-plugin-codex/dist";
 
 await rm(outdir, { recursive: true, force: true });
@@ -18,6 +20,8 @@ await build({
   target: "node22",
   format: "esm",
   minify: true,
+  // GPC-10.2: the published version is a build fact, not a literal a human keeps in sync.
+  define: { __GROK_PLUGIN_VERSION__: JSON.stringify(packageVersion) },
   legalComments: "none",
   logLevel: "info"
 });

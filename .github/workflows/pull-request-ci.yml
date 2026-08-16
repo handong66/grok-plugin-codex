@@ -1,0 +1,35 @@
+# X8: this repository had no CI at all. Every release gate ran on the author's own macOS machine,
+# while the 0.2 audit asked for a macOS/Linux matrix and the user's stated expectation was
+# "push the branch, open a PR, wait for CI; release once CI passes".
+name: pull-request-ci
+
+on:
+  pull_request:
+  push:
+    branches:
+      - main
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  check:
+    name: check (${{ matrix.os }})
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        # Process-tree lifecycle management is only supported on these two, and package.json says so.
+        os: [ubuntu-latest, macos-latest]
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+      - run: npm ci
+      - run: npm run check
+      # The bundles are committed, so a build that changes them is a contract drift, not a rebuild.
+      - name: dist must match src
+        run: git diff --exit-code

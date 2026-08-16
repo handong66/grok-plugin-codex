@@ -1,0 +1,13 @@
+{"type":"tool_call_update","toolCallId":"tool-1","status":"completed","rawOutput":{"redacted":true},"locations":[],"content":[]}
+{"type":"tool_call_update","toolCallId":"tool-2","status":"failed","rawOutput":{"redacted":true},"locations":[],"content":[]}
+{"type":"thought","data":"[redacted thought chunk 6]"}
+{"type":"thought","data":"[redacted thought chunk 7]"}
+{"type":"text","data":"[redacted text chunk 49]"}
+{"type":"text","data":"[redacted text chunk 50]"}
+{"type":"text","data":"[redacted text chunk 51]"}
+{"type":"text","data":"[redacted text chunk 52]"}
+{"type":"available_commands","tools":[],"commands":[]}
+{"type":"usage","usage":{"input_tokens":71203,"output_tokens":546,"cache_read_input_tokens":37376,"cache_creation_input_tokens":0,"reasoning_tokens":181},"signature":"[redacted]"}
+{"type":"tool_call","toolCallId":"tool-80","toolName":"[redacted]","title":"[redacted]","kind":"search","status":"pending","rawInput":{},"locations":[],"content":[]}
+{"type":"tool_call","toolCallId":"tool-82","toolName":"[redacted]","title":"[redacted]","kind":"search","status":"pending","rawInput":{},"locations":[],"content":[]}
+{"type":"end","stopReason":"end_turn","sessionId":"00000000-0000-4000-8000-000000000001","requestId":"00000000-0000-4000-8000-000000000002","usage":{"input_tokens":135434,"cache_read_input_tokens":430592,"cache_creation_input_tokens":0,"output_tokens":10599,"reasoning_tokens":8561,"total_tokens":576625},"num_turns":6,"total_cost_usd":0.09345886}

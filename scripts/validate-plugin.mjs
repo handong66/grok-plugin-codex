@@ -1,6 +1,7 @@
 #!/usr/bin/env node
 import { existsSync, readFileSync } from "node:fs";
 import { join, resolve } from "node:path";
+import { checkVerificationRecords } from "./lib/verification-gate.mjs";
 
 const repoRoot = resolve(".");
 const root = resolve("plugins/grok-plugin-codex");
@@ -16,6 +17,7 @@ const privacyPath = join(repoRoot, "docs", "privacy.md");
 const termsPath = join(repoRoot, "docs", "terms.md");
 const securityPath = join(repoRoot, "SECURITY.md");
 const contributingPath = join(repoRoot, "CONTRIBUTING.md");
+const verificationPath = join(repoRoot, "docs", "verification.md");
 const errors = [];
 
 function readJson(path) {
@@ -45,7 +47,8 @@ for (const path of [
   privacyPath,
   termsPath,
   securityPath,
-  contributingPath
+  contributingPath,
+  verificationPath
 ]) {
   if (!existsSync(path)) errors.push(`missing ${path}`);
 }
@@ -69,9 +72,29 @@ if (
 ) {
   errors.push("plugin build metadata must be a single +codex.<cachebuster> suffix");
 }
+// X8: the published manifest version must never carry the author's local cachebuster. Set
+// GROK_PLUGIN_RELEASE=1 on a tag or release build to enforce that.
+if (process.env.GROK_PLUGIN_RELEASE === "1" && String(manifest.version).includes("+codex.")) {
+  errors.push("release builds must not publish a +codex.<cachebuster> manifest version");
+}
+// X8 / GPC-01.6: the live gate is required before publishing, so the release build refuses to pass
+// while docs/verification.md has no dated live record — naming the CLI version — for this version.
+// The offline gate observes no Grok CLI and can never substitute for it.
+errors.push(
+  ...checkVerificationRecords(
+    existsSync(verificationPath) ? readFileSync(verificationPath, "utf8") : "",
+    String(packageJson.version ?? ""),
+    { release: process.env.GROK_PLUGIN_RELEASE === "1" }
+  )
+);
 const serverSource = existsSync(serverSourcePath) ? readFileSync(serverSourcePath, "utf8") : "";
-if (!serverSource.includes(`version: "${packageJson.version}"`)) {
-  errors.push("MCP server version must match package base version");
+// GPC-10.2: the MCP server version is injected at build time, so the source must not carry a literal
+// and the built bundle must carry exactly the package version.
+if (!serverSource.includes("version: PLUGIN_VERSION")) {
+  errors.push("MCP server must advertise the build-injected PLUGIN_VERSION");
+}
+if (/version:\s*"\d+\.\d+\.\d+/.test(serverSource)) {
+  errors.push("MCP server source must not hard-code a version literal");
 }
 if (manifest.skills !== "./skills/") errors.push("skills must point to ./skills/");
 if (manifest.mcpServers !== "./.mcp.json") errors.push("mcpServers must point to ./.mcp.json");
@@ -117,6 +140,9 @@ if (!skill.includes("resultComplete")) errors.push("skill must document backgrou
 if (!skill.includes("$grok-codex-collaboration")) errors.push("skill must route orchestration to grok-codex-collaboration");
 
 const dist = existsSync(distPath) ? readFileSync(distPath, "utf8") : "";
+if (dist && !dist.includes(`"${packageJson.version}"`)) {
+  errors.push("dist/server.js must embed the package version");
+}
 if (!dist.startsWith("#!/usr/bin/env node")) errors.push("dist/server.js must be executable Node script with shebang");
 const workerDist = existsSync(workerDistPath) ? readFileSync(workerDistPath, "utf8") : "";
 if (!workerDist.startsWith("#!/usr/bin/env node")) errors.push("dist/job-worker.js must be executable Node script with shebang");

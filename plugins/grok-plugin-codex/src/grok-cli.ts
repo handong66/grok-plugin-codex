@@ -3,6 +3,8 @@ import { access } from "node:fs/promises";
 import { delimiter, join } from "node:path";
 import { homedir } from "node:os";
 import { spawn, type ChildProcess } from "node:child_process";
+import { normalizeStopReason } from "./result-parser.js";
+import { defaultDiagnosticRedactor, redactDeviceCode } from "./redact.js";
 import type { GrokModelsSummary, ProcessResult } from "./types.js";
 
 export type DiscoverGrokOptions = {
@@ -26,6 +28,8 @@ export type GrokCapabilities = {
   noSubagents: boolean;
   disableWebSearch: boolean;
   reasoningEffort: boolean;
+  /** `-s, --session-id <SESSION_ID>`: lets the plugin choose the resume handle before the run starts. */
+  sessionId: boolean;
 };
 
 export type RunProcessOptions = {
@@ -65,7 +69,9 @@ export function buildGrokProcessEnv(env: NodeJS.ProcessEnv = process.env): NodeJ
 
 export function buildWorkerEnv(env: NodeJS.ProcessEnv = process.env): NodeJS.ProcessEnv {
   const filtered = buildGrokProcessEnv(env);
-  for (const key of ["GROK_PLUGIN_STATE_DIR", "GROK_PLUGIN_WORKER_PATH"] as const) {
+  // GROK_PLUGIN_RAW_CAPTURE is a plugin-development escape hatch that must reach the worker, which
+  // is the process that decides whether to elide oversized tool payloads.
+  for (const key of ["GROK_PLUGIN_STATE_DIR", "GROK_PLUGIN_WORKER_PATH", "GROK_PLUGIN_RAW_CAPTURE"] as const) {
     if (env[key] !== undefined) filtered[key] = env[key];
   }
   return filtered;
@@ -115,12 +121,27 @@ function appendOutputTail(current: string, chunk: string, maxChars: number): { v
   return { value: combined.slice(-maxChars), truncated: true };
 }
 
+/**
+ * GK9(d): `ESRCH` (the group is gone) and `EPERM` (the group is no longer ours to signal — the
+ * leader was reaped and the pgid was reused, or the survivors changed uid) are indistinguishable
+ * for this caller: in both cases the process tree this plugin owned is not running any more, and
+ * there is nothing left to kill. Rethrowing `EPERM` turned a successful cancel into a retryable
+ * `internal_error` and was the root cause of the intermittent cancel-lifecycle failure recorded by
+ * B1/B2/B3. Every other errno is a real defect and still escapes.
+ */
+const ALREADY_GONE_KILL_ERRNOS = new Set(["ESRCH", "EPERM"]);
+
+/** True when a failed `kill` means "the target is not ours to signal any more", not a defect. */
+export function isAlreadyGoneKillError(error: unknown): boolean {
+  return ALREADY_GONE_KILL_ERRNOS.has((error as NodeJS.ErrnoException | null)?.code ?? "");
+}
+
 export function signalPidTree(pid: number | undefined, signal: NodeJS.Signals): void {
   if (!pid) return;
   try {
     process.kill(process.platform === "win32" ? pid : -pid, signal);
   } catch (error) {
-    if ((error as NodeJS.ErrnoException).code !== "ESRCH") throw error;
+    if (!isAlreadyGoneKillError(error)) throw error;
   }
 }
 
@@ -253,10 +274,122 @@ export async function probeGrokCapabilities(
       permissionModePlan: rawHelp.includes("--permission-mode") && rawHelp.includes("plan"),
       noSubagents: rawHelp.includes("--no-subagents"),
       disableWebSearch: rawHelp.includes("--disable-web-search"),
-      reasoningEffort: rawHelp.includes("--reasoning-effort")
+      reasoningEffort: rawHelp.includes("--reasoning-effort"),
+      sessionId: rawHelp.includes("--session-id")
     },
     rawHelp,
     exitCode: result.exitCode
+  };
+}
+
+export type GrokInvocationProbe = {
+  modelInvocationTested: boolean;
+  callable: boolean;
+  observedStopReason?: string;
+  observedStopReasonNormalized?: string;
+  observedEventTypes: string[];
+  exitCode: number | null;
+  failureReason?: string;
+  /**
+   * X16: the classification of why the probe failed, from the CLI's own error events and stderr.
+   * Without it the probe reported only "exited 1", and a quota-exhausted account whose `grok models`
+   * still lists models came back as `entitled: "unknown"` — an undetermined fact standing in for one
+   * the probe had just determined.
+   */
+  failureCode?: string;
+};
+
+/** Enough of the vendor's own words to act on, never enough to be a log. */
+const PROBE_FAILURE_EXCERPT_CHARS = 300;
+
+export const INVOCATION_PROBE_PROMPT = "Reply with exactly: OK";
+export const INVOCATION_PROBE_TIMEOUT_MS = 30_000;
+
+/**
+ * One deliberately tiny live call that proves the stream vocabulary, not just the flag names.
+ * It spends real quota, so every caller must opt in explicitly (`probeInvocation: true`).
+ */
+export async function probeGrokInvocation(
+  bin: string,
+  options: { cwd: string; model?: string; timeoutMs?: number; env?: NodeJS.ProcessEnv; promptFile: string }
+): Promise<GrokInvocationProbe> {
+  const args = [
+    "--cwd",
+    options.cwd,
+    ...(options.model ? ["-m", options.model] : []),
+    "--output-format",
+    "streaming-json",
+    "--permission-mode",
+    "plan",
+    "--no-subagents",
+    "--max-turns",
+    "1",
+    "--prompt-file",
+    options.promptFile
+  ];
+  const result = await runProcess(bin, args, {
+    cwd: options.cwd,
+    env: options.env,
+    timeoutMs: Math.min(options.timeoutMs ?? INVOCATION_PROBE_TIMEOUT_MS, INVOCATION_PROBE_TIMEOUT_MS)
+  });
+
+  const observedEventTypes: string[] = [];
+  const errorTexts: string[] = [];
+  let observedStopReason: string | undefined;
+  let sawText = false;
+  for (const line of result.stdout.split(/\r?\n/)) {
+    if (!line.trim()) continue;
+    let parsed: unknown;
+    try {
+      parsed = JSON.parse(line);
+    } catch {
+      continue;
+    }
+    if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) continue;
+    const event = parsed as Record<string, unknown>;
+    const type = typeof event.type === "string" ? event.type : "unknown";
+    if (!observedEventTypes.includes(type)) observedEventTypes.push(type);
+    if (type === "text") sawText = true;
+    if (type === "end" && typeof event.stopReason === "string") observedStopReason = event.stopReason;
+    // X16: the vendor's own account of the failure used to be discarded here, leaving only "exited 1".
+    if (type === "error" || event.error !== undefined) {
+      const raw = event.error ?? event.message ?? event.data;
+      if (raw !== undefined) errorTexts.push(typeof raw === "string" ? raw : JSON.stringify(raw));
+    }
+  }
+
+  const observedStopReasonNormalized = normalizeStopReason(observedStopReason);
+  const sawNormalEnd = observedEventTypes.includes("end") && observedStopReasonNormalized === "endturn";
+  const callable = result.exitCode === 0 && !result.timedOut && sawText && sawNormalEnd;
+  // Only vendor error events and stderr, never the probe's own answer text — the classifier is a
+  // substring matcher and Grok's prose must never decide the code (GPC-04).
+  const diagnosticText = [errorTexts.join("\n"), result.stderr].filter((part) => part.trim()).join("\n").trim();
+  const failureCode = callable || !diagnosticText ? undefined : classifyGrokErrorText(diagnosticText);
+  // The excerpt is a diagnostic string leaving the process, so it goes through the same redactor as
+  // every other free-form diagnostic field, and never carries the one-time device code.
+  const excerpt = diagnosticText
+    ? defaultDiagnosticRedactor()(redactDeviceCode(diagnosticText)).replace(/\s+/g, " ").slice(-PROBE_FAILURE_EXCERPT_CHARS)
+    : "";
+  const cause = callable
+    ? undefined
+    : result.timedOut
+      ? "The invocation probe exceeded its 30s budget."
+      : result.exitCode !== 0
+        ? `The invocation probe exited ${result.exitCode}${failureCode ? ` (${failureCode})` : ""}.`
+        : !sawText
+          ? "The invocation probe produced no text event."
+          : `The invocation probe ended with stopReason "${observedStopReason ?? "(absent)"}" instead of a normal end turn.`;
+  const failureReason = cause && excerpt ? `${cause} Grok reported: ${excerpt}` : cause;
+
+  return {
+    modelInvocationTested: true,
+    callable,
+    observedStopReason,
+    observedStopReasonNormalized: observedStopReason === undefined ? undefined : observedStopReasonNormalized,
+    observedEventTypes,
+    exitCode: result.exitCode,
+    failureReason,
+    failureCode
   };
 }
 
@@ -278,7 +411,16 @@ export function parseModelsOutput(raw: string): GrokModelsSummary {
   const lower = raw.toLowerCase();
   const hasPositiveAuthentication = /\b(?:you are )?logged in(?:\s+with\b|\b)/i.test(raw);
   const hasNegativeAuthentication = /\b(?:not logged in|not authenticated|login required|please log in|authentication required|unauthorized)\b/i.test(raw);
-  const loggedIn = hasPositiveAuthentication && !hasNegativeAuthentication;
+  // X8 / SPEC §B GK1.3: "logged out" and "this output does not say" are different facts, and the
+  // two-state `hasPositive && !hasNegative` published the second as the first — `grok_check` wrote it
+  // straight into `authenticated`, so a successful models listing that never mentions login gated the
+  // next job as unauthenticated. Positive evidence is still the only thing that makes it `true`
+  // (SPEC.md:496, the user's own rule); silence is now `"unknown"`.
+  const loggedIn: boolean | "unknown" = hasNegativeAuthentication
+    ? false
+    : hasPositiveAuthentication
+      ? true
+      : "unknown";
   const authMessage = lines.find((line) => /logged in|not logged in|login|required|auth/i.test(line.trim()));
   const defaultModel = lines
     .map((line) => line.match(/^\s*Default model:\s*(.+?)\s*$/i)?.[1]?.trim())
@@ -305,31 +447,87 @@ export function classifyGrokFailure(result: ProcessResult): string {
   return classifyGrokErrorText(text, result);
 }
 
+/**
+ * Paid-balance exhaustion. Numeric and vendor-slug signals lead; prose is the fallback. Note that
+ * none of these patterns may contain an ASCII apostrophe — the CLI writes U+2019.
+ */
+const PAID_QUOTA_MARKERS = [
+  "402 payment required",
+  "balance exhausted",
+  "quota exhausted",
+  "usage limit exceeded",
+  "run out of credits",
+  "spending-limit",
+  "personal-team-blocked"
+];
+
+/** Free-tier exhaustion: a different operator action (wait, upgrade, or route elsewhere). */
+const FREE_TIER_QUOTA_MARKERS = [
+  "reached your free",
+  "usage limit for now",
+  "need a grok subscription",
+  "get supergrok"
+];
+
+/**
+ * Auth needs positive evidence of a sign-in problem. Bare `forbidden` / `unauthorized` used to be
+ * enough, which turned any security review that discussed 403 handling into `auth_required`.
+ */
+const AUTH_MARKERS = [
+  "not logged in",
+  // §D M4 / FINAL Review M2: the recorded sign-in text says "signed in", not "logged in" — and it is
+  // also the wording of this plugin's own DEVICE_AUTH_MESSAGE, so a worker that reported the device
+  // prompt and then had its own message reclassified came back as a generic retryable failure.
+  "not signed in",
+  "sign in required",
+  "please sign in",
+  "not authenticated",
+  "login required",
+  "log in required",
+  "please log in",
+  "authentication required",
+  "authentication failed",
+  "invalid api key",
+  "missing api key",
+  "grok login"
+];
+
+/**
+ * X5: the previous rule was the bare substring `session` plus `not found` / `does not exist`, and
+ * `session_id=<uuid>` — which the CLI prints on every tool error — contains it. These are bounded
+ * phrases instead: `session\b` cannot match `session_id` (the underscore is a word character), and
+ * the recorded GK8 failure text `Failed to restore session from remote: … 404 Not Found` still does.
+ */
+const SESSION_NOT_FOUND_PATTERNS = [
+  /failed to restore session/,
+  /(?:could not|cannot|couldn.t|unable to) (?:restore|resume|find|load|open) (?:the |this )?session/,
+  /session\b[^.\n]{0,80}?\b(?:not found|does not exist|no longer exists)/,
+  /no such session/,
+  /unknown session/
+];
+
 export function classifyGrokErrorText(textValue: string, result?: Pick<ProcessResult, "signal" | "exitCode">): string {
   const text = textValue.toLowerCase();
   if (text.includes("max_turns_reached") || text.includes("max turns reached")) return "max_turns_reached";
-  if (
-    text.includes("402 payment required") ||
-    text.includes("balance exhausted") ||
-    text.includes("quota exhausted") ||
-    text.includes("usage limit exceeded")
-  ) {
-    return "quota_exhausted";
-  }
+  // Quota is checked before auth: the recorded 403 spending-limit failure was reported as
+  // `auth_required` purely because its text contains the word "forbidden".
+  if (PAID_QUOTA_MARKERS.some((marker) => text.includes(marker))) return "quota_exhausted";
+  if (FREE_TIER_QUOTA_MARKERS.some((marker) => text.includes(marker))) return "quota_free_tier";
   if (text.includes("429") || text.includes("rate limit")) return "rate_limited";
-  if (
-    text.includes("not logged in") ||
-    text.includes("not authenticated") ||
-    text.includes("login required") ||
-    text.includes("log in required") ||
-    text.includes("please log in") ||
-    text.includes("authentication required") ||
-    text.includes("unauthorized") ||
-    text.includes("forbidden")
-  ) {
+  if (AUTH_MARKERS.some((marker) => text.includes(marker))) return "auth_required";
+  if (text.includes("401") && (text.includes("unauthorized") || text.includes("authentication") || text.includes("token"))) {
     return "auth_required";
   }
-  if (text.includes("session") && (text.includes("not found") || text.includes("does not exist"))) return "session_not_found";
+  // GK9(a): a recorded run with grok-composer-2.5-fast failed with `tool_output_error` because the
+  // model could not consume its own Read output. Retrying with the same model cannot help.
+  //
+  // X5: this now runs *before* the session check. The recorded tool-error line is
+  // `ERROR tool_error: tool_output_error session_id=<uuid> tool_name="Read" …`, and the worker feeds
+  // the classifier the whole stderr — so a Read failure whose payload also said a path does not exist
+  // used to come back as a non-retryable `session_not_found`, which could then drive
+  // `grok_continue`'s fallbackToLatest onto an unrelated session.
+  if (text.includes("tool_output_error")) return "model_tool_incompatible";
+  if (SESSION_NOT_FOUND_PATTERNS.some((pattern) => pattern.test(text))) return "session_not_found";
   if (text.includes("model") && (text.includes("not found") || text.includes("unavailable") || text.includes("not authorized"))) {
     return "model_unavailable";
   }
@@ -347,16 +545,60 @@ export function isRetryableGrokFailure(code: string): boolean {
   return ["network_error", "rate_limited", "timeout", "terminated", "max_turns_reached", "grok_failed", "unknown"].includes(code);
 }
 
+/**
+ * One remedy sentence, used by every partial-result code. Continuing the same session with
+ * `maxTurns: 1` and an explicit no-tools instruction is the only recovery observed to turn a
+ * stalled run into a complete answer, and it costs seconds rather than a full rerun.
+ */
+export function CONTINUE_WITHOUT_TOOLS_REMEDY(cause: string): string {
+  return (
+    `${cause} Call grok_finalize with this jobId — one turn, no tools, complete answer — or do the ` +
+    "same by hand with grok_continue, maxTurns: 1, and a prompt that says to stop using tools and emit " +
+    "the complete final answer now; do not use any tools. Do not rerun the whole task, and do not raise " +
+    "the budget first — the partial answer is still available from grok_result with the returned jobId."
+  );
+}
+
+/** Extra, non-sensitive fields a code can contribute to `error.details`. */
+export function grokFailureDetails(code: string): Record<string, unknown> | undefined {
+  switch (code) {
+    case "quota_free_tier":
+      return {
+        retryAfterHint:
+          "Wait for the free-tier window to reset, upgrade the account, or route this task to another provider. Do not retry in this session."
+      };
+    case "quota_exhausted":
+      return { retryAfterHint: "Restore the account balance or switch accounts before retrying." };
+    default:
+      return undefined;
+  }
+}
+
 export function grokFailureMessage(code: string): string {
   switch (code) {
     case "quota_exhausted":
-      return "Grok usage balance is exhausted. Replenish the account balance or use another authorized account before retrying.";
+      return "Grok usage balance is exhausted. Replenish the account balance or use another authorized account before retrying. Do not retry with the same account.";
+    case "quota_free_tier":
+      return (
+        "The free Grok usage limit for this account is exhausted for now. Do not retry: wait for the limit " +
+        "to reset, upgrade the account, or route this task to another provider."
+      );
     case "auth_required":
       return "Grok authentication is required. Log in with the Grok CLI before retrying.";
     case "rate_limited":
       return "Grok rate-limited the request. Retry after the provider limit resets.";
     case "session_not_found":
-      return "The requested Grok session was not found. List sessions and select an existing session ID.";
+      return (
+        "The Grok CLI no longer has that session. error.details.candidateSessions lists the sessions this " +
+        "plugin started in the same workspace, newest first; or retry with fallbackToLatest: true to " +
+        "continue the latest session in this workspace."
+      );
+    case "model_tool_incompatible":
+      return (
+        "The selected Grok model could not consume its own tool output (tool_output_error). Fast composer " +
+        "models fail this way on repository work. Rerun with a full model instead; retrying the same model " +
+        "will fail identically."
+      );
     case "model_unavailable":
       return "The requested Grok model is unavailable or unauthorized. Verify it with the current account.";
     case "cli_incompatible":
@@ -366,9 +608,15 @@ export function grokFailureMessage(code: string): string {
     case "unsupported_reasoning_effort":
       return "The selected Grok model does not support reasoning effort. Remove that option or choose a compatible model.";
     case "max_turns_reached":
-      return "Grok reached the configured turn limit before producing a final result. Narrow the target or increase maxTurns before retrying.";
+      // The recovery that actually worked in the recorded window was a one-turn, tool-free
+      // continuation of the same session, not a wider budget or a narrower target.
+      return CONTINUE_WITHOUT_TOOLS_REMEDY(
+        "Grok reached the configured turn limit before producing a final result."
+      );
+    case "timeout":
+      return CONTINUE_WITHOUT_TOOLS_REMEDY("Grok ran out of wall-clock budget before producing a final result.");
     case "terminated":
-      return "Grok was terminated before producing a final result.";
+      return CONTINUE_WITHOUT_TOOLS_REMEDY("Grok was terminated before producing a final result.");
     default:
       return "Grok CLI exited without a usable final result.";
   }

@@ -12,7 +12,9 @@ git diff --check
 
 `npm run check` builds the bundled MCP server, runs tests, validates plugin metadata, and runs the MCP smoke test.
 
-Optional live verification requires an installed and authenticated Grok CLI:
+Live verification requires an installed and authenticated Grok CLI. It is optional while developing
+and **required before publishing** — it is the only gate that observes the real Grok stream, and it
+prints the record to paste into [docs/verification.md](docs/verification.md):
 
 ```bash
 npm run smoke:live-grok
@@ -39,3 +41,21 @@ git diff --check
 ```
 
 Include a short summary of what changed, why it changed, and which checks passed.
+
+## Release cadence and mirroring
+
+Correctness fixes must reach the public repository in the same working session that lands them
+privately. 0.2.1 was merged privately on 2026-07-11 and installed locally the same day, but the public
+repository did not receive it until 2026-08-15 — for five weeks anyone installing from the public
+marketplace got 0.2.0, the version that reported a vendor `Cancelled` stop reason as a completed
+result. A fix that only exists privately does not protect anyone.
+
+- Land the fix, then mirror the branch publicly before the session ends.
+- Tag and release from the public repository, never from a local-only manifest.
+- Release commits must carry a clean semver version: `npm run validate:plugin` fails a release build
+  whose `plugin.json` still has the local `+codex.<cachebuster>` suffix. Set `GROK_PLUGIN_RELEASE=1`
+  when validating a release candidate.
+- A release candidate must also carry a live record: with `GROK_PLUGIN_RELEASE=1`, validation fails
+  while `docs/verification.md` has no dated `Live gate, <version>:` record naming the Grok CLI version
+  `npm run smoke:live-grok` ran against. Merging a branch whose live gate has not run is fine;
+  publishing it is not.

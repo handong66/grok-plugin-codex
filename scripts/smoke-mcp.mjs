@@ -17,6 +17,7 @@ const requiredTools = [
   "grok_adversarial_review",
   "grok_sessions",
   "grok_export",
+  "grok_finalize",
   "grok_status",
   "grok_result",
   "grok_cancel"
@@ -24,7 +25,7 @@ const requiredTools = [
 
 const expectedSchemas = {
   grok_check: {
-    properties: ["cwd", "includeModels", "timeoutMs"],
+    properties: ["cwd", "includeModels", "model", "probeInvocation", "timeoutMs"],
     required: []
   },
   grok_models: {
@@ -53,6 +54,7 @@ const expectedSchemas = {
       "alwaysApprove",
       "background",
       "continueLatest",
+      "fallbackToLatest",
       "cwd",
       "disableWebSearch",
       "maxTurns",
@@ -74,10 +76,11 @@ const expectedSchemas = {
       "maxTurns",
       "model",
       "problem",
+      "prompt",
       "reasoningEffort",
       "timeoutMs"
     ],
-    required: ["cwd", "problem"]
+    required: ["cwd"]
   },
   grok_review: {
     properties: [
@@ -87,11 +90,12 @@ const expectedSchemas = {
       "disableWebSearch",
       "maxTurns",
       "model",
+      "prompt",
       "reasoningEffort",
       "target",
       "timeoutMs"
     ],
-    required: ["cwd", "target"]
+    required: ["cwd"]
   },
   grok_adversarial_review: {
     properties: [
@@ -101,11 +105,17 @@ const expectedSchemas = {
       "disableWebSearch",
       "maxTurns",
       "model",
+      "prompt",
       "reasoningEffort",
       "target",
+      "threatModel",
       "timeoutMs"
     ],
-    required: ["cwd", "target"]
+    required: ["cwd"]
+  },
+  grok_finalize: {
+    properties: ["background", "cwd", "jobId", "model", "sessionId", "timeoutMs"],
+    required: ["cwd"]
   },
   grok_sessions: {
     properties: ["cwd", "limit", "query", "timeoutMs"],
@@ -116,11 +126,11 @@ const expectedSchemas = {
     required: ["cwd", "sessionId"]
   },
   grok_status: {
-    properties: ["jobId"],
+    properties: ["jobId", "waitMs"],
     required: ["jobId"]
   },
   grok_result: {
-    properties: ["jobId", "maxChars"],
+    properties: ["finalTextMaxChars", "finalTextOffset", "includeRawTail", "jobId", "maxChars"],
     required: ["jobId"]
   },
   grok_cancel: {
@@ -192,12 +202,24 @@ try {
   }
 
   const protocolError = await client.callTool(
-    { name: "grok_review", arguments: { cwd: process.cwd() } },
+    { name: "grok_review", arguments: { cwd: process.cwd(), target: 42 } },
     undefined,
     { timeout: 5_000 }
   );
   if (!protocolError.isError || !String(protocolError.content?.[0]?.text ?? "").includes("Input validation error")) {
     throw new Error(`Missing MCP input validation error for grok_review.target: ${JSON.stringify(protocolError)}`);
+  }
+
+  // GPC-11: target and prompt are both optional in the schema, so "exactly one of them" is enforced
+  // in the handler and must come back as a typed business error, not as a schema error.
+  const aliasError = await client.callTool(
+    { name: "grok_review", arguments: { cwd: process.cwd() } },
+    undefined,
+    { timeout: 5_000 }
+  );
+  const aliasEnvelope = JSON.parse(aliasError.content?.[0]?.text ?? "{}");
+  if (!aliasError.isError || aliasEnvelope.error?.code !== "target_required") {
+    throw new Error(`Missing target_required business error for grok_review: ${JSON.stringify(aliasError)}`);
   }
 
   const businessError = await client.callTool(
