@@ -120,12 +120,27 @@ function appendOutputTail(current: string, chunk: string, maxChars: number): { v
   return { value: combined.slice(-maxChars), truncated: true };
 }
 
+/**
+ * GK9(d): `ESRCH` (the group is gone) and `EPERM` (the group is no longer ours to signal — the
+ * leader was reaped and the pgid was reused, or the survivors changed uid) are indistinguishable
+ * for this caller: in both cases the process tree this plugin owned is not running any more, and
+ * there is nothing left to kill. Rethrowing `EPERM` turned a successful cancel into a retryable
+ * `internal_error` and was the root cause of the intermittent cancel-lifecycle failure recorded by
+ * B1/B2/B3. Every other errno is a real defect and still escapes.
+ */
+const ALREADY_GONE_KILL_ERRNOS = new Set(["ESRCH", "EPERM"]);
+
+/** True when a failed `kill` means "the target is not ours to signal any more", not a defect. */
+export function isAlreadyGoneKillError(error: unknown): boolean {
+  return ALREADY_GONE_KILL_ERRNOS.has((error as NodeJS.ErrnoException | null)?.code ?? "");
+}
+
 export function signalPidTree(pid: number | undefined, signal: NodeJS.Signals): void {
   if (!pid) return;
   try {
     process.kill(process.platform === "win32" ? pid : -pid, signal);
   } catch (error) {
-    if ((error as NodeJS.ErrnoException).code !== "ESRCH") throw error;
+    if (!isAlreadyGoneKillError(error)) throw error;
   }
 }
 

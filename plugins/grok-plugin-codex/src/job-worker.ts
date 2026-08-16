@@ -10,6 +10,7 @@ import {
   classifyGrokFailure,
   grokFailureDetails,
   grokFailureMessage,
+  isAlreadyGoneKillError,
   isRetryableGrokFailure,
   signalPidTree,
   signalProcessTree
@@ -250,7 +251,9 @@ function signalPid(pid: number, signal: NodeJS.Signals): void {
   try {
     process.kill(pid, signal);
   } catch (error) {
-    if ((error as NodeJS.ErrnoException).code !== "ESRCH") throw error;
+    // Same rule as signalPidTree: a descendant we may no longer signal (EPERM) is as good as gone,
+    // and letting it escape here only turns a completed teardown into a teardownError.
+    if (!isAlreadyGoneKillError(error)) throw error;
   }
 }
 

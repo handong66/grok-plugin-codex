@@ -136,7 +136,10 @@ as `true` / `false` / `"unknown"` rather than `null`; new tool `grok_finalize`; 
   **`data.outcome: "cancel_requested" | "already_terminal"`**, so a caller can tell a real
   cancellation from a job that had already finished. Unexpected internal failures keep the generic
   `internal_error` message but now carry `error.details.cause` and `errnoCode` — the failure class,
-  never a path or a message.
+  never a path or a message. Signalling an owned process tree now treats `EPERM` exactly like
+  `ESRCH`: when the group has been reaped or is no longer ours to signal there is nothing left to
+  kill, so a successful cancel no longer escapes as a retryable `internal_error` (the recorded
+  intermittent failure of the cross-process cancel test). Any other `kill` errno still surfaces.
 - **GK9(e) — release cadence.** CONTRIBUTING and SECURITY now state that correctness fixes must be
   mirrored publicly in the session that lands them (0.2.1 was private for five weeks while the public
   marketplace served 0.2.0, which reported a cancelled run as complete). `npm run validate:plugin`

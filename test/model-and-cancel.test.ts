@@ -1,6 +1,6 @@
 import { join } from "node:path";
-import { describe, expect, it } from "vitest";
-import { classifyGrokErrorText, grokFailureMessage } from "../plugins/grok-plugin-codex/src/grok-cli.js";
+import { afterEach, describe, expect, it, vi } from "vitest";
+import { classifyGrokErrorText, grokFailureMessage, signalPidTree } from "../plugins/grok-plugin-codex/src/grok-cli.js";
 import { buildRunArgs, grokCancel, grokRun } from "../plugins/grok-plugin-codex/src/tools.js";
 import { fakeGrokScript, makeExecutable, tempDir } from "./helpers.js";
 
@@ -62,6 +62,45 @@ describe("GK9(c) reasoning-effort support is derived, with the literal as fallba
     const built = buildRunArgs({ cwd: "/repo", model: "grok-typo-9", knownModels: ["grok-5"] });
 
     expect(built.warnings.join("\n")).toContain("is not in the model list");
+  });
+});
+
+describe("GK9(d) signalling a process tree that is no longer ours", () => {
+  afterEach(() => {
+    vi.restoreAllMocks();
+  });
+
+  function killThrows(code: string): void {
+    vi.spyOn(process, "kill").mockImplementation(() => {
+      const error = new Error(`kill ${code}`) as NodeJS.ErrnoException;
+      error.code = code;
+      error.errno = -1;
+      error.syscall = "kill";
+      throw error;
+    });
+  }
+
+  // The recorded cancel flake: the owned group was already reaped, kill raised EPERM instead of
+  // ESRCH, and the escaping error became a retryable internal_error on a cancel that had in fact
+  // succeeded. EPERM and ESRCH are the same fact for this caller: nothing of ours is left to kill.
+  it.each(["ESRCH", "EPERM"])("treats kill %s as already gone", (code) => {
+    killThrows(code);
+
+    expect(() => signalPidTree(4242, "SIGTERM")).not.toThrow();
+    expect(process.kill).toHaveBeenCalledTimes(1);
+  });
+
+  it("still surfaces any other kill errno", () => {
+    killThrows("EINVAL");
+
+    expect(() => signalPidTree(4242, "SIGKILL")).toThrow(/EINVAL/);
+  });
+
+  it("does not signal at all without a pid", () => {
+    killThrows("EPERM");
+
+    expect(() => signalPidTree(undefined, "SIGTERM")).not.toThrow();
+    expect(process.kill).not.toHaveBeenCalled();
   });
 });
 
