@@ -647,10 +647,12 @@ export async function runJobWorker(jobId: string, store = new JobStore()): Promi
           // Same gap as above: the zero-evidence verdict was only ever a foreground code. The job
           // stays `succeeded` — the text is real and reachable — but the record now says why it is
           // not a review.
+          // X10: an identical rerun buys the same opinion for another full budget, and the text is
+          // already readable through grok_result — the foreground code says the same.
           latest.error = {
             code: "no_evidence_review",
             message: NO_EVIDENCE_REVIEW_REMEDY,
-            retryable: true,
+            retryable: false,
             details: { phase: "run", toolCallCount: parsed.toolCallCount, evidenceLevel: parsed.evidenceLevel }
           };
         }

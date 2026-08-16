@@ -907,6 +907,11 @@ async function runOrStartJob(params: CommonArgs & {
       }
       // X2: a review that made no tool call produced an opinion, not a review. It gets its own code
       // so the caller can tell it apart from "no answer at all" and can still read the text.
+      //
+      // X10: not retryable. The run succeeded — an identical rerun spends another full budget to buy
+      // the same opinion, and the text is already readable through grok_result. Recovery needs an
+      // operator decision (inline the evidence, or continue the session for the file:line backing),
+      // which is precisely what `retryable: false` tells an automatic caller.
       if (
         result.outputSummary.state === "succeeded_with_text" &&
         result.outputSummary.evidenceLevel === "none"
@@ -914,7 +919,7 @@ async function runOrStartJob(params: CommonArgs & {
         throw new GrokPluginError(
           "no_evidence_review",
           NO_EVIDENCE_REVIEW_REMEDY,
-          true,
+          false,
           diagnosticDetails,
           failureWarnings
         );

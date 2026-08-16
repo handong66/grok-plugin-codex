@@ -216,7 +216,40 @@ printf '%s\\n' '{"type":"tool_call","toolCallId":"t1","toolName":"read_file","ra
     expect(parsed.error.code).toBe("no_evidence_review");
     expect(parsed.error.details.evidenceLevel).toBe("none");
     expect(parsed.error.details.toolCallCount).toBe(0);
+    // X10: the run succeeded. An identical rerun spends another full budget for the same opinion,
+    // and the text is already here — recovery is an operator decision, not a retry.
+    expect(parsed.error.retryable).toBe(false);
     expect(fetched.data.finalText).toBe("GO. No issues found.");
+  }, 30_000);
+
+  // X10 / N2: review defaults to background, so the code the caller actually meets is the one on the
+  // job record. It must agree with the foreground code on `retryable` as well as on `code`.
+  it("reports the same non-retryable zero-evidence verdict on the default background path", async () => {
+    const dir = await tempDir();
+    const stateDir = await tempDir();
+    const grokBin = await makeExecutable(join(dir, "grok"), ZERO_EVIDENCE_GROK);
+    const env = { GROK_BIN: grokBin, GROK_PLUGIN_STATE_DIR: stateDir };
+
+    const started = envelope(
+      await withEnv(env, () =>
+        grokReview({ cwd: dir, _workspaceRoots: [dir], target: "src/index.ts", timeoutMs: 20_000 })
+      )
+    );
+    const jobId = started.data.job.id as string;
+    const finished = await withEnv(env, async () => {
+      for (let attempt = 0; attempt < 200; attempt += 1) {
+        const parsed = envelope(await grokResult({ jobId }));
+        if (!["queued", "running"].includes(parsed.data?.job.status)) return parsed;
+        await new Promise((resolvePromise) => setTimeout(resolvePromise, 100));
+      }
+      throw new Error("Job never reached a terminal state.");
+    });
+
+    expect(started.data.background).toBe(true);
+    expect(finished.data.job.status).toBe("succeeded");
+    expect(finished.data.job.error.code).toBe("no_evidence_review");
+    expect(finished.data.job.error.retryable).toBe(false);
+    expect(finished.data.finalText).toBe("GO. No issues found.");
   }, 30_000);
 
   it("does not store a vendor cancelled stop reason as a succeeded job", async () => {
