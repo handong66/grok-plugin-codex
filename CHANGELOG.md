@@ -53,6 +53,16 @@ All notable user-visible and contract changes to `grok-plugin-codex`.
 
 ### Changed
 
+- **GPC-09 — foreground wait loop.** A blocking `grok_run` / `grok_review` / `grok_adversarial_review` /
+  `grok_rescue` / `grok_continue` call polled the expensive result path every 50 ms; each tick re-read up to
+  4 MB of logs and re-parsed up to 1 M characters of stream inside the shared MCP server process (about 2,400
+  full re-parses for a 120 s job). The loop now polls the cheap `status` path starting at 100 ms with 1.5×
+  backoff capped at 2 s, resets to 100 ms on the `queued → running` transition, and parses the stream exactly
+  once after the job reaches a terminal state.
+- A foreground call now gives up `timeoutMs + 10s` after start and returns the typed, retryable
+  `foreground_wait_timeout` with `details.jobId`, instead of blocking forever on a wedged worker. The job is
+  untouched and can still be read with `grok_status` / `grok_result`.
+
 - `npm run smoke:live-grok` is now a **required** release gate rather than an optional one. It remains outside
   `npm test` and `npm run check`: unit tests never call the real API.
 - Error messages and bundled documentation no longer name a single literal stop reason;

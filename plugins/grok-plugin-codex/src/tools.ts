@@ -43,6 +43,15 @@ let workspaceRootsProvider: WorkspaceRootsProvider = async () => [process.cwd()]
 const COMPOSER_FAST_MODEL = "grok-composer-2.5-fast";
 const DEFAULT_RUN_TIMEOUT_MS = 600_000;
 const DEFAULT_DISCOVERY_TIMEOUT_MS = 30_000;
+const TERMINAL_JOB_STATUSES = new Set(["succeeded", "failed", "cancelled"]);
+/** Foreground wait loop pacing; see GPC-09. */
+const FOREGROUND_POLL_START_MS = 100;
+const FOREGROUND_POLL_MAX_MS = 2_000;
+const FOREGROUND_POLL_GRACE_MS = 10_000;
+
+function sleep(ms: number): Promise<void> {
+  return new Promise((resolvePromise) => setTimeout(resolvePromise, ms));
+}
 
 export function configureWorkspaceRootsProvider(provider: WorkspaceRootsProvider): void {
   workspaceRootsProvider = provider;
@@ -323,23 +332,45 @@ async function runOrStartJob(params: CommonArgs & {
       params.kind === "continue"
         ? buildContinueArgs({ ...params, cwd, capabilities })
         : buildRunArgs({ ...params, cwd, capabilities, readOnly });
+    const effectiveTimeoutMs = params.timeoutMs ?? DEFAULT_RUN_TIMEOUT_MS;
     const job = await store.startGrokJob({
       kind: params.kind,
       cwd,
       args: built.args,
       prompt: params.prompt,
-      timeoutMs: params.timeoutMs ?? DEFAULT_RUN_TIMEOUT_MS,
+      timeoutMs: effectiveTimeoutMs,
       grokSessionId: params.sessionId
     });
     if (params.background) {
       return success({ background: true, job: toPublicJob(job) }, built.warnings);
     }
 
-    let result = await store.result(job.id);
-    while (!["succeeded", "failed", "cancelled"].includes(result.record.status)) {
-      await new Promise((resolvePromise) => setTimeout(resolvePromise, 50));
-      result = await store.result(job.id);
+    // GPC-09: the previous loop called `store.result()` every 50ms. Each call re-read up to 4MB of
+    // logs and re-parsed up to 1M characters of stream inside the MCP server process — roughly 2,400
+    // full re-parses for a 120s job. `status()` is the cheap path (one stat plus one small read), so
+    // the loop polls that with backoff and parses the stream exactly once, after the job is terminal.
+    let record = await store.status(job.id);
+    let delay = FOREGROUND_POLL_START_MS;
+    const waitDeadline = Date.now() + effectiveTimeoutMs + FOREGROUND_POLL_GRACE_MS;
+    while (!TERMINAL_JOB_STATUSES.has(record.status) && Date.now() < waitDeadline) {
+      const previousStatus = record.status;
+      await sleep(delay);
+      record = await store.status(job.id);
+      delay =
+        previousStatus === "queued" && record.status === "running"
+          ? FOREGROUND_POLL_START_MS
+          : Math.min(Math.round(delay * 1.5), FOREGROUND_POLL_MAX_MS);
     }
+    if (!TERMINAL_JOB_STATUSES.has(record.status)) {
+      throw new GrokPluginError(
+        "foreground_wait_timeout",
+        "The Grok job outlived its own timeout budget plus the foreground grace period. " +
+          "It is still recorded; poll grok_status or grok_result with the returned jobId.",
+        true,
+        { jobId: job.id, status: record.status, timeoutMs: effectiveTimeoutMs, graceMs: FOREGROUND_POLL_GRACE_MS }
+      );
+    }
+    const result = await store.result(job.id);
     const durationMs = Math.max(
       0,
       Date.parse(result.record.finishedAt ?? new Date().toISOString()) -
