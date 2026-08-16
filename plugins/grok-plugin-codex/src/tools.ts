@@ -408,6 +408,23 @@ async function runOrStartJob(params: CommonArgs & {
           ? await store.findSessionOrigin(params.sessionId)
           : await store.findLatestSessionOrigin(cwd);
       const originSessionId = params.sessionId ?? origin?.grokSessionId;
+      // The inference is evidence about *permissions*, never proof of *identity*: `--continue` resumes
+      // whichever session the CLI saw last, which may be one this plugin never created, or one this
+      // plugin started more recently in a different workspace. So an inferred target always keeps the
+      // "could not be verified" degradation SPEC GPC-M2 requires — the lookup may tighten the mode, it
+      // must never certify an unverifiable target as "known mutable".
+      if (inferredTarget) {
+        inheritedWarnings.push(
+          origin
+            ? `continueLatest names no session, so the session the Grok CLI will resume could not be ` +
+              `verified; the most recent one this plugin started here (${originSessionId}) came from a ` +
+              `${origin.readOnly ? "read-only" : "mutable"} ${origin.kind} job and is used only to restrict ` +
+              "permissions, never to confirm them. Pass an explicit sessionId to continue a known session."
+            : "This plugin started no session in this workspace, so the read-only mode of the session " +
+              "continueLatest will resume could not be verified; the continuation runs with the permissions " +
+              "given in this call."
+        );
+      }
       if (origin?.readOnly) {
         if (params.alwaysApprove === true) {
           throw new GrokPluginError(
@@ -430,21 +447,16 @@ async function runOrStartJob(params: CommonArgs & {
         readOnly = true;
         inheritedWarnings.push(
           inferredTarget
-            ? `continueLatest resumes the Grok CLI's most recent session; the most recent one this plugin ` +
-              `started here (${originSessionId}) came from a read-only ${origin.kind} job, so this ` +
-              "continuation inherits enforced plan mode without subagents. Pass an explicit sessionId to " +
-              "continue a different session."
+            ? `The most recent Grok session this plugin started here (${originSessionId}) came from a ` +
+              `read-only ${origin.kind} job, so this continuation inherits enforced plan mode without ` +
+              "subagents."
             : `Session ${params.sessionId} was created by a read-only ${origin.kind} job; this continuation ` +
               "inherits enforced plan mode without subagents."
         );
-      } else if (!origin) {
+      } else if (!origin && !inferredTarget) {
         inheritedWarnings.push(
-          inferredTarget
-            ? "This plugin started no session in this workspace, so the read-only mode of the session " +
-              "continueLatest will resume could not be verified; the continuation runs with the permissions " +
-              "given in this call."
-            : "This plugin has no record of the continued session, so its original read-only mode could not be " +
-              "verified; the continuation runs with the permissions given in this call."
+          "This plugin has no record of the continued session, so its original read-only mode could not be " +
+            "verified; the continuation runs with the permissions given in this call."
         );
       }
     }

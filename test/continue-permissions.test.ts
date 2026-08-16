@@ -251,7 +251,7 @@ describe("continue inherits the read-only constraint (GPC-M2)", () => {
     expect(continued.warnings.join(" ")).toContain("explicit sessionId");
   }, 40_000);
 
-  it("leaves continueLatest alone when the newest session in this workspace was mutable", async () => {
+  it("still says continueLatest is unverified when the newest session in this workspace was mutable", async () => {
     const dir = await tempDir();
     const stateDir = await tempDir();
     const run = await grokRecordingArgv(dir, "grok-run");
@@ -277,6 +277,11 @@ describe("continue inherits the read-only constraint (GPC-M2)", () => {
     expect(continued.ok).toBe(true);
     expect(resumeArgv).toContain("--always-approve\n");
     expect(resumeArgv).not.toContain("--permission-mode\nplan\n");
+    // The inference only tightens permissions. `--continue` resumes whatever session the CLI saw
+    // last — possibly one this plugin never created — so a mutable newest session must not silently
+    // certify the target as known; the GPC-M2 degradation stays on every inferred target.
+    expect(continued.warnings.join(" ")).toContain("could not be verified");
+    expect(continued.warnings.join(" ")).toContain("explicit sessionId");
   }, 40_000);
 
   it("warns instead of guessing when the session is unknown to this plugin", async () => {

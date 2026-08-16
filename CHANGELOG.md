@@ -32,8 +32,11 @@ All notable user-visible and contract changes to `grok-plugin-codex`.
   names no session and so skipped the lookup entirely; it now resolves the newest session this plugin started
   in the same workspace and fails closed on it — `alwaysApprove` is refused with
   `error.details.inferredFromLatestJob: true`, and the inherited plan mode says in a warning that an explicit
-  `sessionId` is the way to continue a different session. A session known only from continuations stays
-  "unverified" rather than becoming "known mutable".
+  `sessionId` is the way to continue a different session. That inference can only tighten permissions, never
+  certify them: **every** `continueLatest` call keeps a warning saying the resumed session could not be
+  verified, including the case where the newest session here was mutable, because `--continue` may resume a
+  session this plugin never created. A session known only from continuations likewise stays "unverified"
+  rather than becoming "known mutable".
 
 - **GPC-01 — stop-reason vocabulary (contract).** Completion detection compared `stopReason` against the exact
   strings `"EndTurn"` / `"Cancelled"`, but Grok 1.0.x emits `end_turn` / `cancelled`, so `resultComplete` was
