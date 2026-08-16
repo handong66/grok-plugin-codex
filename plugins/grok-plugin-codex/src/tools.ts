@@ -173,7 +173,7 @@ const FOREGROUND_POLL_GRACE_MS = 10_000;
  * "the dispatched task never came back". Dispatch kinds now default to background; only `continue`
  * — the short finish-the-answer call — stays in the foreground.
  */
-const BACKGROUND_DEFAULT_BY_KIND: Record<JobKind, boolean> = {
+export const BACKGROUND_DEFAULT_BY_KIND: Record<JobKind, boolean> = {
   run: true,
   review: true,
   adversarial_review: true,
