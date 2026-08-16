@@ -14,6 +14,7 @@ import {
   signalProcessTree
 } from "./grok-cli.js";
 import { JobStore } from "./job-store.js";
+import type { PathRedactor } from "./redact.js";
 import { summarizeGrokOutput } from "./result-parser.js";
 import type { JobRecord } from "./types.js";
 
@@ -28,22 +29,25 @@ function boundedText(value: string, maxChars: number): string {
 
 /**
  * A worker that dies with `stdio: "ignore"` loses its exception text for good, so every failure
- * carries enough structure to name one session instead of forcing another log audit.
+ * carries enough structure to name one session instead of forcing another log audit. These fields
+ * reach public MCP envelopes, so the free-form ones go through the store's redactor first: an
+ * `ENOENT ... open '<state>/jobs/<id>.json'` still says which artifact broke without publishing the
+ * caller's home directory or the plugin's install path.
  */
 function describeFailure(
   phase: string,
   error: unknown,
-  teardownError?: string
+  options: { redact: PathRedactor; teardownError?: string }
 ): Record<string, unknown> {
   const asError = error instanceof Error ? error : undefined;
   const stack = asError?.stack ?? "";
   return {
     phase,
     errorName: asError?.name ?? typeof error,
-    errorMessage: boundedText(asError?.message ?? String(error), MAX_ERROR_MESSAGE_CHARS),
+    errorMessage: options.redact(boundedText(asError?.message ?? String(error), MAX_ERROR_MESSAGE_CHARS)),
     errnoCode: (error as NodeJS.ErrnoException | undefined)?.code,
-    stackTail: stack ? stack.slice(-MAX_STACK_TAIL_CHARS) : undefined,
-    ...(teardownError ? { teardownError } : {})
+    stackTail: stack ? options.redact(stack.slice(-MAX_STACK_TAIL_CHARS)) : undefined,
+    ...(options.teardownError ? { teardownError: options.teardownError } : {})
   };
 }
 
@@ -318,9 +322,11 @@ export async function runJobWorker(jobId: string, store = new JobStore()): Promi
       await Promise.all([promptDelivery, streamsClosedPromise]);
       await flushLogs();
     } catch (error) {
-      teardownError = boundedText(
-        error instanceof Error ? `${error.name}: ${error.message}` : String(error),
-        MAX_ERROR_MESSAGE_CHARS
+      teardownError = store.redactDiagnostics(
+        boundedText(
+          error instanceof Error ? `${error.name}: ${error.message}` : String(error),
+          MAX_ERROR_MESSAGE_CHARS
+        )
       );
     } finally {
       clearTimeout(timeout);
@@ -349,7 +355,7 @@ export async function runJobWorker(jobId: string, store = new JobStore()): Promi
         code: "prompt_delivery_error",
         message: "The complete prompt could not be delivered to the Grok CLI.",
         retryable: true,
-        details: describeFailure("prompt_delivery", promptDeliveryError, teardownError)
+        details: describeFailure("prompt_delivery", promptDeliveryError, { redact: store.redactDiagnostics, teardownError })
       };
     } else if (outcome.error) {
       latest.status = "failed";
@@ -357,7 +363,7 @@ export async function runJobWorker(jobId: string, store = new JobStore()): Promi
         code: "spawn_error",
         message: "The Grok CLI process could not be started.",
         retryable: true,
-        details: describeFailure("spawn", outcome.error, teardownError)
+        details: describeFailure("spawn", outcome.error, { redact: store.redactDiagnostics, teardownError })
       };
     } else {
       const parsed = summarizeGrokOutput(
@@ -399,7 +405,7 @@ export async function runJobWorker(jobId: string, store = new JobStore()): Promi
     if (record.status !== "cancelled") {
       // `timedOut` and `cancelRequested` are locals of this same scope, so the reason the run ended
       // is still known here even when the failure happened after the Grok process was gone.
-      const details = describeFailure("worker", error, teardownError);
+      const details = describeFailure("worker", error, { redact: store.redactDiagnostics, teardownError });
       record.finishedAt = new Date().toISOString();
       if (timedOut) {
         record.status = "failed";

@@ -20,6 +20,8 @@ Background state lives under `$GROK_PLUGIN_STATE_DIR`, otherwise `$XDG_STATE_HOM
 
 Private job records can contain the selected workspace path, Grok executable path, non-prompt CLI arguments, timestamps, process identifiers, a random process-group ownership token, and typed error metadata. Public MCP results remove command paths, internal arguments, PIDs, ownership tokens, and state-file paths; unexpected internal errors use a stable sanitized message. Raw stdout/stderr tails may still contain content produced by Grok.
 
+Typed failure diagnostics are the one place where operating-system text reaches a caller verbatim, so they are rewritten before they are written to disk: in `error.details`, the free-form fields `errorMessage`, `stackTail`, `teardownError`, and `workerLogTail` have the state directory replaced by `<state>`, the plugin's installation directory by `<plugin>`, and the home directory by `<home>`. A failure therefore still names its phase, errno, artifact, and stack frames without disclosing where this machine keeps them. Filesystem locations chosen by the caller — the workspace `cwd` and paths the caller wrote into a prompt — are not rewritten.
+
 Terminal artifacts are retained for seven days and cleaned opportunistically. Version 0.2 does not scan or remove legacy workspace-local state created by 0.1.
 
 ## Environment

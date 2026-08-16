@@ -90,6 +90,12 @@ outright still leaves evidence; `JobStore.status()` attaches its tail to `worker
 is in the strict pre-marker layout allowlist and in `cleanupExpiredJobs` — a new artifact name missing
 from either would make `ensure()` reject a real state directory.
 
+These diagnostics are OS text that `toPublicJob` copies straight into public envelopes, so every
+free-form field (`errorMessage`, `stackTail`, `teardownError`, `workerLogTail`) passes through
+`JobStore.redactDiagnostics` (`src/redact.ts`) **before it is persisted**: the state directory becomes
+`<state>`, the install directory `<plugin>`, the home directory `<home>`. Any new free-form diagnostic
+field must go through the same redactor, or docs/privacy.md stops being true.
+
 ## Local upgrade loop
 
 Codex caches local plugins by manifest version. During local iteration, update the manifest cachebuster with the `plugin-creator` helper when available, keep that single `+codex.<cachebuster>` suffix in the source manifest while the local marketplace points at the working repository, reinstall from the confirmed local marketplace, and start a new Codex task. The package and MCP server continue to advertise the base release version. Do not hand-edit Codex cache contents.

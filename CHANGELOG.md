@@ -25,10 +25,13 @@ All notable user-visible and contract changes to `grok-plugin-codex`.
 
 - Typed failure diagnostics on worker-recorded errors:
   `error.details = { phase, errorName, errorMessage (≤500 chars), errnoCode, stackTail, teardownError }`,
-  plus `timeoutMs` on timeouts. Foreground tools merge them into the error envelope.
+  plus `timeoutMs` on timeouts. Foreground tools merge them into the error envelope. The free-form fields are
+  path-redacted before they are persisted — state directory → `<state>`, plugin install directory → `<plugin>`,
+  home directory → `<home>` — so the documented promise that public results carry no state-file or command paths
+  still holds.
 - The worker's own stderr is captured to a private `jobs/<id>.worker.log` (`0600`) instead of being
   discarded, is included in the strict state-directory layout check and in seven-day cleanup, and its
-  tail is attached to `worker_unavailable` as `error.details.workerLogTail`.
+  tail is attached to `worker_unavailable` as `error.details.workerLogTail` (also path-redacted).
 - `sessionIdFromStderr` (§D M8): when stdout carries no `end` event — exactly the timed-out and killed
   runs — the session id is recovered from Grok's `session_id=<uuid>` stderr line, so
   `outputSummary.grokSessionId` is populated where it was previously always undefined.

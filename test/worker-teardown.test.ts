@@ -1,13 +1,20 @@
 import { randomUUID } from "node:crypto";
 import { mkdir, readFile, stat, utimes, writeFile } from "node:fs/promises";
+import { homedir } from "node:os";
 import { join } from "node:path";
 import { describe, expect, it } from "vitest";
 import { JobStore } from "../plugins/grok-plugin-codex/src/job-store.js";
 import { runJobWorker } from "../plugins/grok-plugin-codex/src/job-worker.js";
+import { createPathRedactor } from "../plugins/grok-plugin-codex/src/redact.js";
 import type { JobRecord } from "../plugins/grok-plugin-codex/src/types.js";
 import { makeExecutable, tempDir } from "./helpers.js";
 
 const JOB_ID = "job_1700000000000_abcdef12";
+
+/** The store redacts against its own env, which inherits HOME from this process. */
+function homeDir(): string {
+  return process.env.HOME ?? homedir();
+}
 
 /** runJobWorker spawns its launcher as a child, so the state dir must travel through the env. */
 function storeOptions(stateDir: string) {
@@ -93,6 +100,10 @@ describe("worker teardown classification", () => {
     expect(record.error?.message).toContain("timeoutMs=700");
     expect(record.error?.details?.timeoutMs).toBe(700);
     expect(String(record.error?.details?.teardownError)).toMatch(/ENOTDIR|ENOENT|EEXIST|not a directory/i);
+    // docs/privacy.md promises public results carry no state-file paths; the errno and the artifact
+    // name survive redaction, the location does not.
+    expect(String(record.error?.details?.teardownError)).toContain("<state>/jobs/");
+    expect(String(record.error?.details?.teardownError)).not.toContain(stateDir);
   }, 20_000);
 
   it("classifies a post-teardown failure by the timeout flag instead of worker_error", async () => {
@@ -112,6 +123,8 @@ describe("worker teardown classification", () => {
     expect(String(record.error?.details?.errorMessage)).toContain("injected terminal write failure");
     expect(record.error?.details?.errorName).toBe("Error");
     expect(String(record.error?.details?.stackTail)).toContain("Error");
+    // The stack names local files; the caller must not learn where this machine keeps them.
+    expect(String(record.error?.details?.stackTail)).not.toContain(homeDir());
   }, 20_000);
 
   it("classifies a post-teardown failure on a cancelled job as cancelled", async () => {
@@ -206,6 +219,61 @@ describe("worker stderr capture", () => {
     expect(reconciled.status).toBe("failed");
     expect(reconciled.error?.code).toBe("worker_unavailable");
     expect(String(reconciled.error?.details?.workerLogTail)).toContain("the worker exploded here");
+  });
+
+  it("redacts state, install, and home paths out of the worker log tail", async () => {
+    const stateDir = await tempDir();
+    const store = new JobStore(stateDir);
+    const running: JobRecord = {
+      id: JOB_ID,
+      kind: "run",
+      status: "running",
+      cwd: "/repo",
+      command: "grok",
+      args: [],
+      createdAt: new Date().toISOString(),
+      startedAt: new Date().toISOString(),
+      timeoutMs: 1_000,
+      workerPid: 999_999_999
+    };
+    await store.write(running);
+    // Raw Node stderr, i.e. exactly the shape a crashing worker writes.
+    await writeFile(
+      store.workerLogPath(JOB_ID),
+      [
+        `Error: ENOENT: no such file or directory, open '${join(stateDir, "jobs", `${JOB_ID}.json`)}'`,
+        `    at file://${store.workerPath}:1:1`,
+        `    at ${homeDir()}/projects/thing.js:2:2`,
+        ""
+      ].join("\n"),
+      { mode: 0o600 }
+    );
+
+    const reconciled = await store.status(JOB_ID);
+    const tail = String(reconciled.error?.details?.workerLogTail);
+
+    expect(tail).toContain("ENOENT: no such file or directory");
+    expect(tail).toContain("<state>/jobs/");
+    expect(tail).toContain("<home>/projects/thing.js");
+    expect(tail).not.toContain(stateDir);
+    expect(tail).not.toContain(homeDir());
+    expect(tail).not.toContain(store.workerPath);
+  });
+
+  it("prefers the longest matching root and does not eat a sibling directory name", () => {
+    const redact = createPathRedactor([
+      { path: "/home/user", label: "<home>" },
+      { path: "/home/user/.local/state/grok-plugin-codex/", label: "<state>" },
+      { path: "/", label: "<ignored>" }
+    ]);
+
+    expect(redact("open '/home/user/.local/state/grok-plugin-codex/jobs/job_x.json'")).toBe(
+      "open '<state>/jobs/job_x.json'"
+    );
+    expect(redact("at /home/user/projects/app.js:1:1")).toBe("at <home>/projects/app.js:1:1");
+    // `/home/user` must not rewrite `/home/username`, and `/` must never rewrite everything.
+    expect(redact("/home/username/other")).toBe("/home/username/other");
+    expect(redact("/etc/hosts")).toBe("/etc/hosts");
   });
 
   it("does not delete a worker log that still belongs to an unfinished job", async () => {

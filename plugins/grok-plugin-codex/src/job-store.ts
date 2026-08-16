@@ -7,6 +7,7 @@ import { join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import { promisify } from "node:util";
 import { buildWorkerEnv, discoverGrok, signalPidTree } from "./grok-cli.js";
+import { jobDiagnosticRedactor, type PathRedactor } from "./redact.js";
 import { summarizeGrokOutput } from "./result-parser.js";
 import {
   GrokPluginError,
@@ -165,12 +166,19 @@ export class JobStore {
   readonly stateDir: string;
   readonly workerPath: string;
   readonly env: NodeJS.ProcessEnv;
+  /** Applied to every free-form diagnostic before it is persisted; see src/redact.ts. */
+  readonly redactDiagnostics: PathRedactor;
 
   constructor(options: string | JobStoreOptions = {}) {
     const normalized = typeof options === "string" ? { stateDir: options } : options;
     this.env = { ...process.env, ...(normalized.env ?? {}) };
     this.stateDir = resolve(normalized.stateDir ?? defaultJobStateDir(this.env));
     this.workerPath = normalized.workerPath ?? defaultWorkerPath(this.env);
+    this.redactDiagnostics = jobDiagnosticRedactor({
+      stateDir: this.stateDir,
+      workerPath: this.workerPath,
+      env: this.env
+    });
   }
 
   private jobsDir(): string {
@@ -468,7 +476,9 @@ export class JobStore {
     await this.terminateOwnedWorker(record);
     record = await this.read(jobId);
     if (TERMINAL_STATUSES.has(record.status) || (await this.hasFreshHeartbeat(jobId))) return record;
-    const workerLogTail = await readTail(this.workerLogPath(jobId), WORKER_LOG_TAIL_CHARS);
+    // Raw Node stderr from the worker names the state directory and the install path; the tail is a
+    // public field, so it is redacted before it is written into the record.
+    const workerLogTail = this.redactDiagnostics(await readTail(this.workerLogPath(jobId), WORKER_LOG_TAIL_CHARS));
     record.status = "failed";
     record.error = {
       code: "worker_unavailable",
