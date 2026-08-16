@@ -48,7 +48,7 @@ released.
 4. Plugin/marketplace validation.
 5. MCP tool-list and schema smoke testing.
 
-The lifecycle suite covers MCP restart, natural completion, cancel markers, process-tree cancellation, timeout, forced worker death with verified orphan reaping, foreground MCP exit, monotonic terminal state, private permissions, prompt-descriptor handoff/cleanup, final-text parsing, truncation, symlink boundaries, and workspace state pollution in both containment directions.
+The lifecycle suite covers MCP restart, natural completion, cancel markers, process-tree cancellation, timeout, forced worker death with verified orphan reaping, foreground MCP exit, monotonic terminal state, private permissions, and prompt handoff through a `0600` FIFO in a random `0700` directory. The prompt regression verifies complete content, FIFO type/mode, parent mode, absence from argv, and unlink immediately after Grok opens the path. The gate also covers final-text parsing, truncation, symlink boundaries, and workspace state pollution in both containment directions.
 
 Validate both skills with the current `skill-creator` validator:
 

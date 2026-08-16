@@ -51,9 +51,10 @@ describe("background default (GPC-M1)", () => {
     const grokBin = await makeExecutable(
       join(dir, "grok"),
       `#!/bin/sh
-if [ "$1" = "--version" ]; then echo "grok fake 1.0.3"; exit 0; fi
-if [ "$1" = "--help" ]; then echo "--prompt-file streaming-json --permission-mode plan --no-subagents --disable-web-search --session-id"; exit 0; fi
-printf '%s\\n' '{"type":"text","data":"continued"}' '{"type":"end","stopReason":"end_turn","sessionId":"c1"}'
+	if [ "$1" = "--version" ]; then echo "grok fake 1.0.3"; exit 0; fi
+	if [ "$1" = "--help" ]; then echo "--prompt-file streaming-json --permission-mode plan --no-subagents --disable-web-search --session-id"; exit 0; fi
+	previous=""; for arg in "$@"; do if [ "$previous" = "--prompt-file" ]; then cat "$arg" >/dev/null; fi; previous="$arg"; done
+	printf '%s\\n' '{"type":"text","data":"continued"}' '{"type":"end","stopReason":"end_turn","sessionId":"c1"}'
 `
     );
 

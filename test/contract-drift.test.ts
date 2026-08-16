@@ -78,7 +78,8 @@ describe("published contract drift", () => {
     // 0.2.1 told callers to match stopReason === "EndTurn"; Grok 1.0.x emits end_turn.
     expect(published).not.toMatch(/stopReason: "EndTurn"/);
     expect(published).toContain("normalis");
-    expect(published).toContain("/dev/fd/3");
+    expect(published).toContain("private FIFO");
+    expect(published).not.toContain("/dev/fd/3");
     expect(published).toContain("resultComplete");
     expect(published).toContain("cancelled_output");
     expect(published).toContain("max_turns_reached");

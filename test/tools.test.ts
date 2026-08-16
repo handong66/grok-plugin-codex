@@ -154,6 +154,7 @@ exit 1
         `#!/bin/sh
 if [ "$1" = "--version" ]; then echo "grok fake 1.0.3"; exit 0; fi
 if [ "$1" = "--help" ]; then echo "--prompt-file streaming-json --permission-mode plan --no-subagents --disable-web-search"; exit 0; fi
+previous=""; for arg in "$@"; do if [ "$previous" = "--prompt-file" ]; then cat "$arg" >/dev/null; fi; previous="$arg"; done
 printf '%s\n' '{"type":"text","data":"I will review the diff."}' '{"type":"end","stopReason":"${stopReason}","sessionId":"cancelled-session","requestId":"cancelled-request"}'
 `
       );
@@ -226,6 +227,7 @@ printf '%s\n' '{"type":"text","data":"I will review the diff."}' '{"type":"end",
       `#!/bin/sh
 if [ "$1" = "--version" ]; then echo "grok fake 0.2.93"; exit 0; fi
 if [ "$1" = "--help" ]; then echo "--prompt-file streaming-json --permission-mode plan --no-subagents --disable-web-search"; exit 0; fi
+previous=""; for arg in "$@"; do if [ "$previous" = "--prompt-file" ]; then cat "$arg" >/dev/null; fi; previous="$arg"; done
 printf '%s\n' '{"type":"max_turns_reached"}' '{"type":"end","stopReason":"cancelled","sessionId":"max-turns-session"}'
 echo 'Error: max turns reached' >&2
 exit 1
@@ -436,20 +438,38 @@ printf '%s\n' '{"type":"text","data":"OK"}' '{"type":"end","stopReason":"end_tur
     await expect(access(argsFile)).rejects.toMatchObject({ code: "ENOENT" });
   });
 
-  it("grok_run sends prompt text through a private file descriptor instead of argv or retained state", async () => {
+  it("grok_run hands the complete prompt through a private FIFO that is unlinked after Grok opens it", async () => {
     const dir = await tempDir();
     const argsFile = join(dir, "argv.log");
+    const handoffFile = join(dir, "handoff.json");
     const stateDir = await tempDir();
+    const prompt = `portable prompt sentinel\n${"x".repeat(32_768)}\ncomplete`;
     const grokBin = await makeExecutable(
       join(dir, "grok"),
-      `#!/bin/sh
-if [ "$1" = "--version" ]; then echo "grok fake 0.2.93"; exit 0; fi
-if [ "$1" = "--help" ]; then
-  echo "--prompt-file --output-format streaming-json --permission-mode plan --no-subagents --disable-web-search --reasoning-effort"
-  exit 0
-fi
-printf '%s\n' "$@" > ${JSON.stringify(argsFile)}
-printf '%s\n' '{"type":"text","data":"OK"}' '{"type":"end","stopReason":"end_turn","sessionId":"s1"}'
+      `#!/usr/bin/env node
+import { existsSync, lstatSync, readFileSync, statSync, writeFileSync } from "node:fs";
+import { dirname } from "node:path";
+const args = process.argv.slice(2);
+if (args[0] === "--version") { console.log("grok fake 0.2.93"); process.exit(0); }
+if (args[0] === "--help") {
+  console.log("--prompt-file --output-format streaming-json --permission-mode plan --no-subagents --disable-web-search --reasoning-effort");
+  process.exit(0);
+}
+writeFileSync(${JSON.stringify(argsFile)}, args.join("\\n") + "\\n");
+const promptPath = args[args.indexOf("--prompt-file") + 1];
+const fifo = lstatSync(promptPath);
+const parent = statSync(dirname(promptPath));
+const prompt = readFileSync(promptPath, "utf8");
+writeFileSync(${JSON.stringify(handoffFile)}, JSON.stringify({
+  prompt,
+  promptPath,
+  isFifo: fifo.isFIFO(),
+  fifoMode: fifo.mode & 0o777,
+  parentMode: parent.mode & 0o777,
+  pathExistsAfterRead: existsSync(promptPath)
+}));
+console.log(JSON.stringify({ type: "text", data: "OK" }));
+console.log(JSON.stringify({ type: "end", stopReason: "end_turn", sessionId: "s1" }));
 `
     );
 
@@ -459,7 +479,7 @@ printf '%s\n' '{"type":"text","data":"OK"}' '{"type":"end","stopReason":"end_tur
         ...roots(dir),
         background: false,
         model: "grok-build",
-        prompt: "review this diff",
+        prompt,
         disableWebSearch: true,
         noSubagents: true,
         maxTurns: 1
@@ -469,13 +489,22 @@ printf '%s\n' '{"type":"text","data":"OK"}' '{"type":"end","stopReason":"end_tur
     const argv = await readFile(argsFile, "utf8");
     const argvLines = argv.trim().split("\n");
     const promptPath = argvLines[argvLines.indexOf("--prompt-file") + 1];
+    const handoff = JSON.parse(await readFile(handoffFile, "utf8"));
 
     expect(parsed.ok).toBe(true);
     expect(parsed.data.finalText).toBe("OK");
     expect(argv).toContain("--output-format\nstreaming-json\n");
     expect(argv).toContain("--prompt-file\n");
-    expect(argv).not.toContain("review this diff");
-    expect(promptPath).toBe("/dev/fd/3");
+    expect(argv).not.toContain(prompt);
+    expect(promptPath).not.toBe("/dev/fd/3");
+    expect(handoff).toMatchObject({
+      prompt,
+      promptPath,
+      isFifo: true,
+      fifoMode: 0o600,
+      parentMode: 0o700,
+      pathExistsAfterRead: false
+    });
     expect((await readdir(join(stateDir, "jobs"))).filter((entry) => entry.endsWith(".input"))).toEqual([]);
   });
 
@@ -487,6 +516,7 @@ printf '%s\n' '{"type":"text","data":"OK"}' '{"type":"end","stopReason":"end_tur
       `#!/bin/sh
 if [ "$1" = "--version" ]; then echo "grok fake 0.2.93"; exit 0; fi
 if [ "$1" = "--help" ]; then echo "--prompt-file streaming-json --permission-mode plan --no-subagents --disable-web-search"; exit 0; fi
+previous=""; for arg in "$@"; do if [ "$previous" = "--prompt-file" ]; then cat "$arg" >/dev/null; fi; previous="$arg"; done
 if [ "$GROK_PLUGIN_CODEX_SECRET_TEST" = "should-not-leak" ]; then value=LEAKED; else value=CLEAN; fi
 printf '{"type":"text","data":"%s"}\n' "$value"
 printf '%s\n' '{"type":"end","stopReason":"end_turn","sessionId":"s1"}'
@@ -530,17 +560,15 @@ exit 1
     expect(parsed.error.message).toContain("usage balance is exhausted");
   });
 
-  it("fails when the Grok CLI closes the inherited prompt descriptor before full delivery", async () => {
+  it("fails when the Grok CLI reports success without opening its private prompt source", async () => {
     const dir = await tempDir();
     const stateDir = await tempDir();
     const grokBin = await makeExecutable(
       join(dir, "grok"),
       `#!/usr/bin/env node
-import { closeSync } from "node:fs";
 const args = process.argv.slice(2);
 if (args[0] === "--version") { console.log("grok fake 0.2.93"); process.exit(0); }
 if (args[0] === "--help") { console.log("--prompt-file streaming-json --permission-mode plan --no-subagents --disable-web-search"); process.exit(0); }
-closeSync(3);
 console.log(JSON.stringify({ type: "text", data: "invalid success" }));
 console.log(JSON.stringify({ type: "end", sessionId: "s1" }));
 `
@@ -596,6 +624,7 @@ console.log(JSON.stringify({ type: "end", sessionId: "s1" }));
       `#!/bin/sh
 if [ "$1" = "--version" ]; then echo "grok fake 0.2.93"; exit 0; fi
 if [ "$1" = "--help" ]; then echo "--prompt-file streaming-json --permission-mode plan --no-subagents --disable-web-search"; exit 0; fi
+previous=""; for arg in "$@"; do if [ "$previous" = "--prompt-file" ]; then cat "$arg" >/dev/null; fi; previous="$arg"; done
 printf '%s\n' "$@" > ${JSON.stringify(argsFile)}
 printf '%s\n' '{"type":"text","data":"diagnosis"}' '{"type":"end","stopReason":"end_turn","sessionId":"s1"}'
 `

@@ -10,7 +10,7 @@
 - `grok_review`, `grok_adversarial_review`, and `grok_rescue` run with Grok plan permissions and no subagents, which refuses shell execution: inline the diff, test log, or command output the review needs into the target. A run cancelled because a shell command needed approval comes back as `permission_denied_headless`, and refusals are listed in `outputSummary.deniedToolCalls`.
 - `target` (or `problem`) also accepts the sibling opencode plugin's name, `prompt` — exactly one of the two. `grok_adversarial_review` takes an optional `threatModel`; findings outside it are advisory and may not block.
 - `grok_finalize` is the one-call recovery: one turn, no tools, complete answer, anything unverified marked `UNVERIFIED`.
-- Prompts are staged in private `0600` files, consumed and deleted by the worker, then passed to Grok through `--prompt-file /dev/fd/3`; prompt text never enters process arguments.
+- Prompts are staged in private `0600` files, consumed and deleted by the worker, then passed through a `0600` FIFO in a random `0700` directory. Grok receives only the private FIFO path through `--prompt-file`; the path is unlinked as soon as Grok opens it, before any prompt bytes are written, and prompt text never enters process arguments.
 - Session export returns Markdown and never writes a caller-selected file.
 
 Successful tools return:

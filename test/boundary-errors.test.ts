@@ -12,9 +12,10 @@ import { envelope, fakeGrokScript, makeExecutable, tempDir, withEnv } from "./he
 
 function fakeGrok(): string {
   return `#!/bin/sh
-if [ "$1" = "--version" ]; then echo "grok fake 1.0.3"; exit 0; fi
-if [ "$1" = "--help" ]; then echo "--prompt-file streaming-json --permission-mode plan --no-subagents"; exit 0; fi
-printf '%s\\n' '{"type":"tool_call","toolCallId":"t","name":"read_file","data":{"path":"/tmp/a"}}' '{"type":"text","data":"ok"}' '{"type":"end","stopReason":"end_turn"}'
+	if [ "$1" = "--version" ]; then echo "grok fake 1.0.3"; exit 0; fi
+	if [ "$1" = "--help" ]; then echo "--prompt-file streaming-json --permission-mode plan --no-subagents"; exit 0; fi
+	previous=""; for arg in "$@"; do if [ "$previous" = "--prompt-file" ]; then cat "$arg" >/dev/null; fi; previous="$arg"; done
+	printf '%s\\n' '{"type":"tool_call","toolCallId":"t","name":"read_file","data":{"path":"/tmp/a"}}' '{"type":"text","data":"ok"}' '{"type":"end","stopReason":"end_turn"}'
 `;
 }
 
@@ -149,7 +150,11 @@ describe("GK8 session_not_found", () => {
       `#!/bin/sh
 if [ "$1" = "--version" ]; then echo "grok fake 1.0.3"; exit 0; fi
 if [ "$1" = "--help" ]; then echo "--prompt-file streaming-json --permission-mode plan --no-subagents"; exit 0; fi
-for arg in "$@"; do printf '%s\\n' "$arg" >> ${JSON.stringify(argvLog)}; done
+	for arg in "$@"; do
+	  printf '%s\\n' "$arg" >> ${JSON.stringify(argvLog)}
+	  if [ "$prev" = "--prompt-file" ]; then cat "$arg" >/dev/null; fi
+	  prev="$arg"
+	done
 case " $* " in
   *"--resume="*)
     echo "Failed to restore session from remote: 404 Not Found" >&2

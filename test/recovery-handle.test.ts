@@ -26,6 +26,7 @@ if [ "$1" = "--help" ]; then
   echo "  -s, --session-id <SESSION_ID>  Use a specific session UUID for a new conversation"
   exit 0
 fi
+	previous=""; for arg in "$@"; do if [ "$previous" = "--prompt-file" ]; then cat "$arg" >/dev/null; fi; previous="$arg"; done
 ${body}
 `;
 }

@@ -94,6 +94,11 @@ ${modelsOutput}
 MODELS_EOF
   exit 0
 fi
+previous=""
+for arg in "$@"; do
+  if [ "$previous" = "--prompt-file" ]; then cat "$arg" >/dev/null; fi
+  previous="$arg"
+done
 case " $* " in
   *" sessions "*|*" export "*)
     for arg in "$@"; do printf '%s\\n' "$arg"; done

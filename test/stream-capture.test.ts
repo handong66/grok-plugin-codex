@@ -17,11 +17,13 @@ async function stdoutLog(stateDir: string): Promise<string> {
 
 /** Streams `count` tool_call_update events of `chars` each, then a short answer. */
 function echoHeavyGrok(count: number, chars: number): string {
-  return [
-    "#!/usr/bin/env node",
-    "const args = process.argv.slice(2);",
+	  return [
+	    "#!/usr/bin/env node",
+	    'import { readFileSync } from "node:fs";',
+	    "const args = process.argv.slice(2);",
     'if (args[0] === "--version") { console.log("grok fake 1.0.3"); process.exit(0); }',
-    'if (args[0] === "--help") { console.log("--prompt-file --output-format streaming-json --permission-mode plan --no-subagents --disable-web-search"); process.exit(0); }',
+	    'if (args[0] === "--help") { console.log("--prompt-file --output-format streaming-json --permission-mode plan --no-subagents --disable-web-search"); process.exit(0); }',
+	    'readFileSync(args[args.indexOf("--prompt-file") + 1], "utf8");',
     `const blob = "e".repeat(${chars});`,
     `for (let i = 0; i < ${count}; i += 1) {`,
     '  console.log(JSON.stringify({ type: "tool_call_update", toolCallId: "tool-" + i, rawOutput: { text: blob } }));',

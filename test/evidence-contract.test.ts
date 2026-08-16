@@ -45,9 +45,10 @@ function verdictStream(withEvidence: boolean): string {
 
 /** Answers immediately with a verdict and never touches a tool. */
 const ZERO_EVIDENCE_GROK = `#!/bin/sh
-if [ "$1" = "--version" ]; then echo "grok fake 1.0.3"; exit 0; fi
-if [ "$1" = "--help" ]; then echo "--prompt-file streaming-json --permission-mode plan --no-subagents --disable-web-search"; exit 0; fi
-printf '%s\\n' '{"type":"text","data":"GO. No issues found."}' '{"type":"end","stopReason":"end_turn","sessionId":"zero-evidence"}'
+	if [ "$1" = "--version" ]; then echo "grok fake 1.0.3"; exit 0; fi
+	if [ "$1" = "--help" ]; then echo "--prompt-file streaming-json --permission-mode plan --no-subagents --disable-web-search"; exit 0; fi
+	previous=""; for arg in "$@"; do if [ "$previous" = "--prompt-file" ]; then cat "$arg" >/dev/null; fi; previous="$arg"; done
+	printf '%s\\n' '{"type":"text","data":"GO. No issues found."}' '{"type":"end","stopReason":"end_turn","sessionId":"zero-evidence"}'
 `;
 
 describe("evidence contract (X2 / GK2)", () => {
@@ -236,9 +237,10 @@ printf '%s\\n' '{"type":"tool_call","toolCallId":"t1","toolName":"read_file","ra
     const grokBin = await makeExecutable(
       join(dir, "grok"),
       `#!/bin/sh
-if [ "$1" = "--version" ]; then echo "grok fake 1.0.3"; exit 0; fi
-if [ "$1" = "--help" ]; then echo "--prompt-file streaming-json --permission-mode plan --no-subagents --disable-web-search"; exit 0; fi
-printf '%s\\n' '{"type":"text","data":"partial work"}' '{"type":"end","stopReason":"cancelled","sessionId":"vendor-cancel"}'
+	if [ "$1" = "--version" ]; then echo "grok fake 1.0.3"; exit 0; fi
+	if [ "$1" = "--help" ]; then echo "--prompt-file streaming-json --permission-mode plan --no-subagents --disable-web-search"; exit 0; fi
+	previous=""; for arg in "$@"; do if [ "$previous" = "--prompt-file" ]; then cat "$arg" >/dev/null; fi; previous="$arg"; done
+	printf '%s\\n' '{"type":"text","data":"partial work"}' '{"type":"end","stopReason":"cancelled","sessionId":"vendor-cancel"}'
 `
     );
 

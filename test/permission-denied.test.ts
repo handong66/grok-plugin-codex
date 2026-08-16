@@ -17,9 +17,10 @@ const DENIED_SHELL_STREAM = [
 
 function fakeGrokWithDeniedShell(): string {
   return `#!/bin/sh
-if [ "$1" = "--version" ]; then echo "grok fake 1.0.3"; exit 0; fi
-if [ "$1" = "--help" ]; then echo "--prompt-file streaming-json --permission-mode plan --no-subagents --disable-web-search -s, --session-id"; exit 0; fi
-printf '%s\\n' ${DENIED_SHELL_STREAM}
+	if [ "$1" = "--version" ]; then echo "grok fake 1.0.3"; exit 0; fi
+	if [ "$1" = "--help" ]; then echo "--prompt-file streaming-json --permission-mode plan --no-subagents --disable-web-search -s, --session-id"; exit 0; fi
+	previous=""; for arg in "$@"; do if [ "$previous" = "--prompt-file" ]; then cat "$arg" >/dev/null; fi; previous="$arg"; done
+	printf '%s\\n' ${DENIED_SHELL_STREAM}
 `;
 }
 
@@ -94,9 +95,10 @@ describe("GK5 shell approval in plan mode", () => {
     const grokBin = await makeExecutable(
       join(dir, "grok"),
       `#!/bin/sh
-if [ "$1" = "--version" ]; then echo "grok fake 1.0.3"; exit 0; fi
-if [ "$1" = "--help" ]; then echo "--prompt-file streaming-json --permission-mode plan --no-subagents --disable-web-search -s, --session-id"; exit 0; fi
-printf '%s\\n' '{"type":"tool_call","toolCallId":"t1","name":"run_terminal_command","data":{"command":"npm test"}}' '{"type":"tool_call_update","toolCallId":"t1","name":"run_terminal_command","data":{"result":"12 passing"}}' '{"type":"text","data":"partial progress"}' '{"type":"end","stopReason":"cancelled","sessionId":"mutable-cancel"}'
+	if [ "$1" = "--version" ]; then echo "grok fake 1.0.3"; exit 0; fi
+	if [ "$1" = "--help" ]; then echo "--prompt-file streaming-json --permission-mode plan --no-subagents --disable-web-search -s, --session-id"; exit 0; fi
+	previous=""; for arg in "$@"; do if [ "$previous" = "--prompt-file" ]; then cat "$arg" >/dev/null; fi; previous="$arg"; done
+	printf '%s\\n' '{"type":"tool_call","toolCallId":"t1","name":"run_terminal_command","data":{"command":"npm test"}}' '{"type":"tool_call_update","toolCallId":"t1","name":"run_terminal_command","data":{"result":"12 passing"}}' '{"type":"text","data":"partial progress"}' '{"type":"end","stopReason":"cancelled","sessionId":"mutable-cancel"}'
 `
     );
 

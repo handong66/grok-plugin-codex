@@ -47,9 +47,9 @@ Adding, removing, or renaming a tool or argument must change the source schema a
 
 ## Command rules
 
-- Foreground and background prompts both use `streaming-json`; the worker removes the staging file before passing the prompt through native `--prompt-file /dev/fd/3`.
+- Foreground and background prompts both use `streaming-json`; the worker removes the staging file before passing the prompt through native `--prompt-file` backed by a `0600` FIFO in a random `0700` directory. The launcher waits for Grok to open the FIFO, unlinks the path, and only then writes the prompt.
 - Prompt text never appears in persisted job arguments or process argv.
-- Inherited prompt delivery must reach fd3 `finish`; premature close is a typed failure even if Grok prints a syntactically complete response.
+- Inherited worker-to-launcher delivery must reach fd3 `finish`, and the launcher-to-Grok FIFO must be opened and fully written; premature close is a typed failure even if Grok prints a syntactically complete response.
 - Read-only review/rescue tools force `--permission-mode plan` and `--no-subagents`.
 - Mutable runs pass `--always-approve` only when explicitly requested.
 - Continuation requires `sessionId` or explicit `continueLatest: true`.

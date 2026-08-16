@@ -79,7 +79,7 @@ Input schema violations are SDK-generated tool errors (`isError: true`) without 
 
 Workspace operations require `cwd`. The server canonicalizes symlinks and requires the resolved directory to remain inside an active MCP workspace root. Private Codex paths such as `~/.codex` are blocked unless the user explicitly authorizes that risk.
 
-Prompts are staged briefly in private `0600` files so a detached worker can survive MCP-server exit. The worker reads and deletes the staging file before Grok runs, then supplies the prompt through file descriptor 3 with Grok's native `--prompt-file /dev/fd/3`. Prompt text is not placed in the child-process argument list or job record. `GROK_BIN` is the only supported custom executable configuration and must come from the trusted MCP environment.
+Prompts are staged briefly in private `0600` files so a detached worker can survive MCP-server exit. The worker reads and deletes the staging file before Grok runs, then supplies the prompt through a `0600` FIFO inside a random `0700` directory. Grok receives only that private pathname through native `--prompt-file`; the launcher unlinks it as soon as Grok opens it, before writing any prompt bytes. Prompt text is not placed in the child-process argument list or job record. `GROK_BIN` is the only supported custom executable configuration and must come from the trusted MCP environment.
 
 ## Background jobs
 

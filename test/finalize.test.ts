@@ -49,7 +49,11 @@ async function startJobWithLearnedSession(): Promise<{
     `#!/bin/sh
 if [ "$1" = "--version" ]; then echo "grok fake 1.0.3"; exit 0; fi
 if [ "$1" = "--help" ]; then echo "--prompt-file streaming-json --permission-mode plan --no-subagents"; exit 0; fi
-for arg in "$@"; do printf '%s\\n' "$arg" >> ${JSON.stringify(argvLog)}; done
+	for arg in "$@"; do
+	  printf '%s\\n' "$arg" >> ${JSON.stringify(argvLog)}
+	  if [ "$prev" = "--prompt-file" ]; then cat "$arg" >/dev/null; fi
+	  prev="$arg"
+	done
 case " $* " in
   *"--resume="*)
     printf '%s\\n' '{"type":"text","data":"the complete answer"}' '{"type":"end","stopReason":"end_turn"}'
@@ -181,9 +185,10 @@ describe("GK4 grok_finalize", () => {
     const grokBin = await makeExecutable(
       join(workspace, "grok"),
       `#!/bin/sh
-if [ "$1" = "--version" ]; then echo "grok fake 1.0.3"; exit 0; fi
-if [ "$1" = "--help" ]; then echo "--prompt-file streaming-json --permission-mode plan --no-subagents"; exit 0; fi
-printf '%s\\n' '{"type":"text","data":"partial"}'
+	if [ "$1" = "--version" ]; then echo "grok fake 1.0.3"; exit 0; fi
+	if [ "$1" = "--help" ]; then echo "--prompt-file streaming-json --permission-mode plan --no-subagents"; exit 0; fi
+	previous=""; for arg in "$@"; do if [ "$previous" = "--prompt-file" ]; then cat "$arg" >/dev/null; fi; previous="$arg"; done
+	printf '%s\\n' '{"type":"text","data":"partial"}'
 exit 0
 `
     );

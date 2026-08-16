@@ -40,6 +40,7 @@ if [ "$1" = "--help" ]; then
 ${options.sessionIdCapable === false ? "" : '  echo "  -s, --session-id <SESSION_ID>"\n'}  exit 0
 fi
 printf '%s\\n' "$@" > ${JSON.stringify(argvPath)}
+previous=""; for arg in "$@"; do if [ "$previous" = "--prompt-file" ]; then cat "$arg" >/dev/null; fi; previous="$arg"; done
 ${missingSessionCases ? `case " $* " in\n${missingSessionCases}esac\n` : ""}printf '%s\\n' '{"type":"tool_call","toolCallId":"t1","toolName":"read_file","rawInput":{"path":"/repo/src/index.ts"}}' '{"type":"text","data":"done"}' '${endEvent}'
 `
   );

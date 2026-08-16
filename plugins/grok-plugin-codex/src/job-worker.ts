@@ -1,7 +1,8 @@
 #!/usr/bin/env node
-import { closeSync } from "node:fs";
-import { appendFile, chmod, readFile, rm, stat, writeFile } from "node:fs/promises";
+import { constants, closeSync, readFileSync } from "node:fs";
+import { appendFile, chmod, mkdtemp, open, readFile, rm, stat, writeFile } from "node:fs/promises";
 import { execFile, spawn, type ChildProcess } from "node:child_process";
+import { dirname, join } from "node:path";
 import { pathToFileURL } from "node:url";
 import { promisify } from "node:util";
 import {
@@ -50,6 +51,7 @@ const DEVICE_AUTH_MESSAGE =
   "then waited for a browser sign-in that a headless job can never complete. Sign in with the Grok CLI " +
   "in an interactive terminal and retry. The one-time device code is deliberately not repeated here.";
 const execFileAsync = promisify(execFile);
+const PROMPT_DELIVERY_EXIT_CODE = 86;
 
 function boundedText(value: string, maxChars: number): string {
   return value.length > maxChars ? value.slice(0, maxChars) : value;
@@ -280,29 +282,81 @@ export async function runGrokLauncher(jobId: string, processToken: string, store
   if (!record.processToken || record.processToken !== processToken) {
     throw new Error("Grok launcher ownership token mismatch.");
   }
-  const grok = spawn(record.command, [...record.args, "--prompt-file", "/dev/fd/3"], {
-    cwd: record.cwd,
-    detached: false,
-    stdio: ["ignore", "inherit", "inherit", 3],
-    env: buildGrokProcessEnv(store.env)
-  });
+  const prompt = readFileSync(3, "utf8");
   try {
     closeSync(3);
   } catch {
-    // The descriptor may already be closed if launcher setup failed.
+    // `readFileSync` does not own a caller-supplied descriptor, but a failed read may have closed it.
   }
-  const outcome = await new Promise<{ exitCode: number | null; error?: Error }>((resolvePromise) => {
+
+  const handoffDir = await mkdtemp(join(dirname(store.inputPath(jobId)), `.${jobId}.prompt-`));
+  const promptPath = join(handoffDir, "prompt.fifo");
+  await chmod(handoffDir, 0o700);
+  try {
+    await execFileAsync("mkfifo", ["-m", "600", promptPath], {
+      encoding: "utf8",
+      timeout: 2_000,
+      maxBuffer: 64 * 1_024,
+      env: buildGrokProcessEnv(store.env)
+    });
+    await chmod(promptPath, 0o600);
+
+    const grok = spawn(record.command, [...record.args, "--prompt-file", promptPath], {
+      cwd: record.cwd,
+      detached: false,
+      stdio: ["ignore", "inherit", "inherit"],
+      env: buildGrokProcessEnv(store.env)
+    });
     let settled = false;
-    const finish = (value: { exitCode: number | null; error?: Error }) => {
-      if (settled) return;
-      settled = true;
-      resolvePromise(value);
-    };
-    grok.once("error", (error) => finish({ exitCode: null, error }));
-    grok.once("exit", (exitCode) => finish({ exitCode }));
-  });
-  await terminateLauncherDescendants();
-  return outcome.error ? 1 : (outcome.exitCode ?? 1);
+    const outcomePromise = new Promise<{ exitCode: number | null; error?: Error }>((resolvePromise) => {
+      const finish = (value: { exitCode: number | null; error?: Error }) => {
+        if (settled) return;
+        settled = true;
+        resolvePromise(value);
+      };
+      grok.once("error", (error) => finish({ exitCode: null, error }));
+      grok.once("exit", (exitCode) => finish({ exitCode }));
+    });
+
+    let promptHandle: Awaited<ReturnType<typeof open>> | undefined;
+    let promptReaderOpened = false;
+    try {
+      while (!settled) {
+        try {
+          promptHandle = await open(promptPath, constants.O_WRONLY | constants.O_NONBLOCK);
+          promptReaderOpened = true;
+          break;
+        } catch (error) {
+          if ((error as NodeJS.ErrnoException).code !== "ENXIO") throw error;
+          await new Promise((resolvePromise) => setTimeout(resolvePromise, 10));
+        }
+      }
+      if (!promptHandle) throw new Error("The Grok CLI exited before opening its private prompt source.");
+
+      // A successful non-blocking writer open proves Grok already holds the read side. Remove the
+      // pathname before writing any bytes, so the prompt is reachable only through the two open ends.
+      await rm(promptPath, { force: true });
+      await rm(handoffDir, { recursive: true, force: true });
+      await promptHandle.writeFile(prompt, "utf8");
+      await promptHandle.close();
+      promptHandle = undefined;
+    } catch {
+      await promptHandle?.close().catch(() => undefined);
+      if (grok.pid) signalPid(grok.pid, "SIGTERM");
+      const outcome = await outcomePromise;
+      await terminateLauncherDescendants();
+      if (!promptReaderOpened && (outcome.error || outcome.exitCode !== 0)) {
+        return outcome.error ? 1 : (outcome.exitCode ?? 1);
+      }
+      return PROMPT_DELIVERY_EXIT_CODE;
+    }
+
+    const outcome = await outcomePromise;
+    await terminateLauncherDescendants();
+    return outcome.error ? 1 : (outcome.exitCode ?? 1);
+  } finally {
+    await rm(handoffDir, { recursive: true, force: true }).catch(() => undefined);
+  }
 }
 
 export async function runJobWorker(jobId: string, store = new JobStore()): Promise<void> {
@@ -591,7 +645,7 @@ export async function runJobWorker(jobId: string, store = new JobStore()): Promi
         retryable: true,
         details: { phase: "run", timeoutMs: latest.timeoutMs, ...(teardownError ? { teardownError } : {}) }
       };
-    } else if (promptDeliveryError) {
+    } else if (promptDeliveryError || outcome.exitCode === PROMPT_DELIVERY_EXIT_CODE) {
       latest.status = "failed";
       latest.error = {
         code: "prompt_delivery_error",

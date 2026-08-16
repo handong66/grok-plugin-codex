@@ -19,6 +19,16 @@ the recovery handle's `suggested.tool` is `grok_finalize`
 
 ### Fixed
 
+- **CI-LINUX-1 — Linux could deliver an empty prompt through `/dev/fd/3`.** The detached worker
+  handed a pipe to its launcher as fd 3, then asked Grok to reopen that pipe through
+  `--prompt-file /dev/fd/3`. Darwin tolerated that indirection, while Linux resolves `/dev/fd`
+  through `/proc/self/fd` and the fake/real consumer could observe an empty, already-consumed
+  stream. The launcher now reads its inherited descriptor directly, creates a `0600` FIFO inside a
+  random `0700` directory, waits until Grok has opened the FIFO, unlinks the pathname, and only then
+  writes the prompt. Prompt text remains absent from argv and persisted job arguments, and the
+  temporary pathname is gone before Grok processes the request. The cross-process cancellation
+  failure was downstream of the same empty-prompt check; its grandchild fixture also receives a
+  longer readiness window so Linux startup variance cannot let the marker win before cancellation.
 - **X1 — a plan-mode permission verdict on a run that was never in plan mode.**
   `outputSummary.shellApprovalBlocked` only checked that a cancelled turn's last tool activity looked
   like a shell command, never that the job actually ran under enforced `--permission-mode plan`. A

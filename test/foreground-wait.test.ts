@@ -7,9 +7,10 @@ import { ToolResult, envelope, fakeGrokScript, makeExecutable, tempDir, withEnv 
 /** A Grok that keeps the job running for `delayMs` before emitting its answer. */
 function slowGrokScript(delayMs: number): string {
   return `#!/bin/sh
-if [ "$1" = "--version" ]; then echo "grok fake 1.0.3"; exit 0; fi
-if [ "$1" = "--help" ]; then echo "--prompt-file streaming-json --permission-mode plan --no-subagents --disable-web-search --session-id"; exit 0; fi
-sleep ${delayMs / 1000}
+	if [ "$1" = "--version" ]; then echo "grok fake 1.0.3"; exit 0; fi
+	if [ "$1" = "--help" ]; then echo "--prompt-file streaming-json --permission-mode plan --no-subagents --disable-web-search --session-id"; exit 0; fi
+	previous=""; for arg in "$@"; do if [ "$previous" = "--prompt-file" ]; then cat "$arg" >/dev/null; fi; previous="$arg"; done
+	sleep ${delayMs / 1000}
 printf '%s\\n' '{"type":"text","data":"OK"}' '{"type":"end","stopReason":"end_turn","sessionId":"slow-session"}'
 `;
 }

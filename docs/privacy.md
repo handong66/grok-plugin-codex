@@ -10,7 +10,7 @@ The plugin starts a local Node.js MCP server. Foreground and background requests
 
 ## Prompt handling
 
-Prompt text is staged briefly in a private `0600` file so the detached worker can acquire it. The worker reads and removes that file before starting Grok, then sends the prompt through inherited file descriptor 3 with `--prompt-file /dev/fd/3`. Prompt text is not placed in process arguments or persisted job arguments. A crash before worker acquisition is reconciled by job status/result or the next opportunistic cleanup.
+Prompt text is staged briefly in a private `0600` file so the detached worker can acquire it. The worker reads and removes that file before starting Grok, then sends the prompt to its private launcher through inherited file descriptor 3. The launcher creates a `0600` FIFO inside a random `0700` directory and passes only that private pathname to Grok with `--prompt-file`. A non-blocking writer open succeeds only after Grok has opened the FIFO for reading; the launcher then unlinks the FIFO and directory before writing any prompt bytes through the already-open descriptor. Prompt text is not placed in process arguments or persisted job arguments, and no prompt pathname remains while Grok processes the request. A crash before worker acquisition is reconciled by job status/result or the next opportunistic cleanup.
 
 The plugin cannot redact arbitrary text intentionally supplied in `prompt`, `problem`, or `target`. Do not send secrets, credentials, private tool output, or sensitive file contents.
 

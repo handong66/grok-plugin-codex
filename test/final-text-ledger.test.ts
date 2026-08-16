@@ -20,9 +20,10 @@ async function waitForTerminal(store: JobStore, jobId: string): Promise<void> {
 
 function fakeGrok(): string {
   return `#!/bin/sh
-if [ "$1" = "--version" ]; then echo "grok fake 1.0.3"; exit 0; fi
-if [ "$1" = "--help" ]; then echo "--prompt-file streaming-json --permission-mode plan --no-subagents"; exit 0; fi
-printf '%s\\n' '{"type":"tool_call","toolCallId":"t1","name":"read_file","data":{"path":"/tmp/a.ts"}}' '{"type":"text","data":"first "}' '{"type":"text","data":"second"}' '{"type":"end","stopReason":"end_turn","sessionId":"ledger-session","requestId":"ledger-request"}'
+	if [ "$1" = "--version" ]; then echo "grok fake 1.0.3"; exit 0; fi
+	if [ "$1" = "--help" ]; then echo "--prompt-file streaming-json --permission-mode plan --no-subagents"; exit 0; fi
+	previous=""; for arg in "$@"; do if [ "$previous" = "--prompt-file" ]; then cat "$arg" >/dev/null; fi; previous="$arg"; done
+	printf '%s\\n' '{"type":"tool_call","toolCallId":"t1","name":"read_file","data":{"path":"/tmp/a.ts"}}' '{"type":"text","data":"first "}' '{"type":"text","data":"second"}' '{"type":"end","stopReason":"end_turn","sessionId":"ledger-session","requestId":"ledger-request"}'
 `;
 }
 
@@ -205,9 +206,11 @@ async function pacedGrok(dir: string): Promise<string> {
     join(dir, "paced-grok.mjs"),
     [
       "#!/usr/bin/env node",
+      "import { readFile } from 'node:fs/promises';",
       "const args = process.argv.slice(2);",
       "if (args[0] === '--version') { console.log('grok fake 1.0.3'); process.exit(0); }",
       "if (args[0] === '--help') { console.log('--prompt-file --output-format streaming-json --permission-mode plan --no-subagents'); process.exit(0); }",
+      "await readFile(args[args.indexOf('--prompt-file') + 1], 'utf8');",
       "const emit = (event) => console.log(JSON.stringify(event));",
       "emit({ type: 'text', data: 'first ' });",
       "setTimeout(() => {",
