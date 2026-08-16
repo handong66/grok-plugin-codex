@@ -90,6 +90,22 @@ describe("GPC-11 sibling-plugin argument name", () => {
     expect(both.error.code).toBe("target_required");
   });
 
+  /**
+   * FINAL Review M9. The bundled skill still told Codex that review "requires an explicit non-empty
+   * `target`", so the accepted `prompt` spelling and the typed `target_required` refusal existed only
+   * in the tool schema and the READMEs — and the skill is what a delegating agent actually reads.
+   */
+  it("documents the accepted spellings and the typed refusal in the bundled skill", async () => {
+    const skill = await readFile("plugins/grok-plugin-codex/skills/grok/SKILL.md", "utf8");
+
+    expect(skill).toContain("`target` or, equivalently, `prompt`");
+    expect(skill).toContain("`problem` or `prompt`");
+    expect(skill).toContain("target_required");
+    expect(skill).toContain("target_too_large");
+    // The claim the skill used to make — that the schema demands a target — is no longer true.
+    expect(skill).not.toContain("require an explicit non-empty `target`");
+  });
+
   it("joins an array target into a bulleted block", async () => {
     const { workspace, promptCopy, env, common } = await setup();
 
