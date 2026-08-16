@@ -344,6 +344,9 @@ export async function runJobWorker(jobId: string, store = new JobStore()): Promi
         record.waitingForAuth = true;
         // Publish the flag immediately: grok_status is the cheap path an unattended orchestrator polls.
         authFlagChain = authFlagChain.catch(() => undefined).then(async () => {
+          // Flush first: the flag sends the caller to the sign-in URL, which lives in the stderr tail
+          // that is otherwise still sitting in the 25 ms buffer when the flag becomes readable.
+          await flushLogs().catch(() => undefined);
           const latest = await store.read(jobId);
           if (!["succeeded", "failed", "cancelled"].includes(latest.status)) {
             latest.waitingForAuth = true;

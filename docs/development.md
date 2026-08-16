@@ -63,13 +63,18 @@ Streaming lines may contain non-JSON diagnostics. The parser accepts JSON events
 2. non-empty text;
 3. an `end` event whose normalised stop reason is not a cancellation;
 4. no structured stream error;
-5. no output truncation.
+5. no *text* truncation: `record.textTruncated`, set only when the capture window evicted characters
+   that came from `text` events. `outputTruncated` alone — the shared window overflowing, which is
+   normally the 84.6 % of a stream that is tool echo — only adds a warning and cannot veto a result;
+6. for `kind: review` and `kind: adversarial_review`, at least one tool call. A verdict with
+   `toolCallCount === 0` inspected nothing, so it is reported as `no_evidence_review` with
+   `evidenceLevel: "none"` and never as a completed review (X2).
 
 `normalizeStopReason` lowercases the raw value and strips every non-letter, so `EndTurn`, `end_turn`, and `END-TURN` are one fact; `cancelled` and `canceled` are accepted spellings of the other. An unrecognised stop reason on a stream that ended with non-empty text fails **open**: the result is complete, `stopReasonRecognised` is false, and `outputSummary.warnings` names the raw value. The exact-match rule that shipped in 0.2.1 is what made every real Grok 1.0.x completion look incomplete.
 
 Only then is `resultComplete` true. Codex still verifies the result against real workspace files.
 
-An end event whose normalised stop reason is a cancellation remains `cancelled_partial` and foreground tools return `cancelled_output`. A `max_turns_reached` stream event is a typed retryable failure; callers should narrow the target or increase `maxTurns`. Both paths retain the Grok session ID, request ID, stop reason, bounded stderr, and partial text for diagnosis or continuation.
+An end event whose normalised stop reason is a cancellation remains `cancelled_partial` and foreground tools return `cancelled_output`; a vendor `cancelled` stop reason is stored as a `cancelled` job, never as `succeeded`. A `max_turns_reached` stream event is a typed retryable failure. The remedy the runtime prints (`CONTINUE_WITHOUT_TOOLS_REMEDY`) is to continue the same session with `maxTurns: 1` and a prompt to stop using tools and emit the final answer — not to narrow the target or raise `maxTurns` — and it is reachable as the `recovery.suggested` call on every non-complete envelope. Both paths retain the Grok session ID, request ID, stop reason, bounded stderr, and partial text for diagnosis or continuation. Guidance text lives in `grok-cli.ts` / `result-parser.ts`; the READMEs and `skills/grok/SKILL.md` must not tell a caller something the error message contradicts.
 
 ## Failure classification
 

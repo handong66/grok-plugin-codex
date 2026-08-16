@@ -25,7 +25,7 @@ Operate the installed `grok_*` tools according to their current schemas. Codex o
 ## Safety and recovery
 
 - Never send hidden Codex context, system/developer messages, reasoning, credentials, arbitrary tool output, or private paths such as `~/.codex`.
-- Treat `{ ok: false, error: { code, message, retryable } }` as a machine-readable business failure. Narrow the target before retrying partial, timed-out, or truncated work.
+- Treat `{ ok: false, error: { code, message, retryable } }` as a machine-readable business failure. For partial, timed-out, cancelled, or `max_turns_reached` work, run `error.details.recovery.suggested` — the same session with `maxTurns: 1` and a prompt to stop using tools and emit the final answer now. Do not narrow the target, raise the budget, or rerun the task to recover an answer that already exists.
 - Do not assume capabilities or tools that the current MCP server does not advertise.
 
 For bounded Codex↔Grok delegation, implementation, review gates, rescue, or handoff records, use `$grok-codex-collaboration` as the primary skill. This skill owns only the installed tool contract and is loaded alongside it only when direct capability details are needed.
