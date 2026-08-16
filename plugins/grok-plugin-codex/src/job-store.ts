@@ -539,6 +539,19 @@ export class JobStore {
   }
 
   /**
+   * X3 / X4: `record.grokSessionId` is written before the worker starts only when the CLI advertises
+   * `--session-id`; otherwise the id is learned from the `end` event (or the `session_id=` the CLI
+   * prints to stderr) and the worker persists it at completion. A record written by an older build,
+   * or one whose worker died before that write, still has the id in its stream summary — so the
+   * permission lookup consults that too rather than resolving the session to "unknown" and letting
+   * `alwaysApprove` through.
+   */
+  private async recordSessionId(jobId: string, record: JobRecord): Promise<string | undefined> {
+    if (record.grokSessionId) return record.grokSessionId;
+    return (await this.readStreamProgress(jobId))?.grokSessionId;
+  }
+
+  /**
    * GPC-M2: what a session is allowed to do is decided by the job that created it, not by the
    * arguments of the call that resumes it. A session touched by any enforced read-only job stays
    * read-only, so an adversarial-review session cannot be continued with write permissions.
@@ -556,7 +569,7 @@ export class JobStore {
       const jobId = entry.name.slice(0, -5);
       if (!JOB_ID_PATTERN.test(jobId)) continue;
       const record = await this.read(jobId).catch(() => null);
-      if (!record || record.grokSessionId !== grokSessionId) continue;
+      if (!record || (await this.recordSessionId(jobId, record)) !== grokSessionId) continue;
       readOnly ||= jobWasReadOnly(record);
       const candidate = { jobId, kind: record.kind, createdAt: Date.parse(record.createdAt) };
       if (!earliest || !Number.isFinite(earliest.createdAt) || candidate.createdAt <= earliest.createdAt) {
@@ -588,22 +601,32 @@ export class JobStore {
     await this.ensure();
     const workspace = resolve(cwd);
     const entries = await readdir(this.jobsDir(), { withFileTypes: true }).catch(() => []);
-    let latest: { grokSessionId: string; createdAt: number } | undefined;
+    const candidates: { grokSessionId: string; createdAt: number }[] = [];
     for (const entry of entries) {
       if (!entry.isFile() || !entry.name.endsWith(".json")) continue;
       const jobId = entry.name.slice(0, -5);
       if (!JOB_ID_PATTERN.test(jobId)) continue;
       const record = await this.read(jobId).catch(() => null);
-      if (!record?.grokSessionId || resolve(record.cwd) !== workspace) continue;
-      const createdAt = Date.parse(record.createdAt);
-      if (!latest || !Number.isFinite(latest.createdAt) || createdAt >= latest.createdAt) {
-        latest = { grokSessionId: record.grokSessionId, createdAt };
-      }
+      if (!record || resolve(record.cwd) !== workspace) continue;
+      // X9: a named continuation that died with `session_not_found` still carries the id it *asked
+      // for* and the newest timestamp, so it shadowed the genuinely latest session — and because a
+      // `continue` job is never an origin, the lookup below then returned `undefined` and the whole
+      // fail-closed guard degraded into a warning. A session the CLI has already denied is not a
+      // candidate for "the session the CLI is about to resume".
+      if (record.error?.code === "session_not_found") continue;
+      const grokSessionId = await this.recordSessionId(jobId, record);
+      if (!grokSessionId) continue;
+      candidates.push({ grokSessionId, createdAt: Date.parse(record.createdAt) || 0 });
     }
-    if (!latest) return undefined;
-    // Resolve through the session lookup so "any job on this session was read-only" still holds.
-    const origin = await this.findSessionOrigin(latest.grokSessionId);
-    return origin ? { ...origin, grokSessionId: latest.grokSessionId } : undefined;
+    candidates.sort((a, b) => b.createdAt - a.createdAt);
+    // Resolve through the session lookup so "any job on this session was read-only" still holds, and
+    // keep walking back: the newest id that resolves to a real origin is better evidence than the
+    // newest id overall, which may belong to a session this plugin only ever continued.
+    for (const grokSessionId of new Set(candidates.map((candidate) => candidate.grokSessionId))) {
+      const origin = await this.findSessionOrigin(grokSessionId);
+      if (origin) return { ...origin, grokSessionId };
+    }
+    return undefined;
   }
 
   /**

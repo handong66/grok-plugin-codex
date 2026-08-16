@@ -30,19 +30,42 @@ async function withEnv<T>(values: Record<string, string | undefined>, operation:
 }
 
 /** Records its own argv so the test can prove which permission flags reached the CLI. */
-async function grokRecordingArgv(dir: string, name: string): Promise<{ bin: string; argvPath: string }> {
+async function grokRecordingArgv(
+  dir: string,
+  name: string,
+  /**
+   * `sessionIdCapable: false` models a CLI without `-s, --session-id`, where the plugin cannot assign
+   * the handle up front and the id is only ever learned from the `end` event; `endSessionId` is the
+   * id that event reports. `missingSessions` makes a `--resume=` of those ids fail the way the Grok
+   * CLI does when the session is gone.
+   */
+  options: { sessionIdCapable?: boolean; endSessionId?: string; missingSessions?: string[] } = {}
+): Promise<{ bin: string; argvPath: string }> {
   const argvPath = join(dir, `${name}.argv.log`);
+  const endEvent = JSON.stringify({
+    type: "end",
+    stopReason: "end_turn",
+    ...(options.endSessionId ? { sessionId: options.endSessionId } : {})
+  });
+  const missingSessionCases = (options.missingSessions ?? [])
+    .map(
+      (sessionId) => `  *"--resume=${sessionId}"*)
+    echo "Failed to restore session from remote: 404 Not Found" >&2
+    exit 1
+    ;;
+`
+    )
+    .join("");
   const bin = await makeExecutable(
     join(dir, name),
     `#!/bin/sh
 if [ "$1" = "--version" ]; then echo "grok fake 1.0.3"; exit 0; fi
 if [ "$1" = "--help" ]; then
   echo "--prompt-file --output-format streaming-json --permission-mode plan --no-subagents --disable-web-search"
-  echo "  -s, --session-id <SESSION_ID>"
-  exit 0
+${options.sessionIdCapable === false ? "" : '  echo "  -s, --session-id <SESSION_ID>"\n'}  exit 0
 fi
 printf '%s\\n' "$@" > ${JSON.stringify(argvPath)}
-printf '%s\\n' '{"type":"tool_call","toolCallId":"t1","toolName":"read_file","rawInput":{"path":"/repo/src/index.ts"}}' '{"type":"text","data":"done"}' '{"type":"end","stopReason":"end_turn"}'
+${missingSessionCases ? `case " $* " in\n${missingSessionCases}esac\n` : ""}printf '%s\\n' '{"type":"tool_call","toolCallId":"t1","toolName":"read_file","rawInput":{"path":"/repo/src/index.ts"}}' '{"type":"text","data":"done"}' '${endEvent}'
 `
   );
   return { bin, argvPath };
@@ -283,6 +306,96 @@ describe("continue inherits the read-only constraint (GPC-M2)", () => {
     expect(continued.warnings.join(" ")).toContain("could not be verified");
     expect(continued.warnings.join(" ")).toContain("explicit sessionId");
   }, 40_000);
+
+  it("inherits read-only from a session id that was only ever learned from the end event (X4)", async () => {
+    const dir = await tempDir();
+    const stateDir = await tempDir();
+    const learned = "01a00152-52ee-7252-9e7c-9682d567aaaa";
+    // A CLI without `-s, --session-id`: the plugin cannot pick the handle, so `record.grokSessionId`
+    // is undefined when the job starts and the only source is the `end` event. Before the worker
+    // wrote it back, findSessionOrigin keyed on a field nobody had filled in, so this read-only
+    // session resolved to "no record of the continued session" — a warning, with alwaysApprove
+    // accepted, which is precisely the escalation GPC-M2 exists to prevent.
+    const review = await grokRecordingArgv(dir, "grok-review", {
+      sessionIdCapable: false,
+      endSessionId: learned
+    });
+    const resume = await grokRecordingArgv(dir, "grok-resume", { sessionIdCapable: false });
+
+    await withEnv({ GROK_BIN: review.bin, GROK_PLUGIN_STATE_DIR: stateDir }, () =>
+      grokReview({ cwd: dir, _workspaceRoots: [dir], target: "src/index.ts", background: false, timeoutMs: 20_000 })
+    );
+    expect(await sessionIdOf(stateDir)).toBe(learned);
+
+    const escalated = envelope(
+      await withEnv({ GROK_BIN: resume.bin, GROK_PLUGIN_STATE_DIR: stateDir }, () =>
+        grokContinue({ cwd: dir, _workspaceRoots: [dir], prompt: "now fix it", sessionId: learned, alwaysApprove: true })
+      )
+    );
+    expect(escalated.ok).toBe(false);
+    expect(escalated.error.code).toBe("readonly_session_escalation");
+    expect(escalated.error.details.originKind).toBe("review");
+    await expect(access(resume.argvPath)).rejects.toMatchObject({ code: "ENOENT" });
+
+    const continued = envelope(
+      await withEnv({ GROK_BIN: resume.bin, GROK_PLUGIN_STATE_DIR: stateDir }, () =>
+        grokContinue({ cwd: dir, _workspaceRoots: [dir], prompt: "finish the review", sessionId: learned })
+      )
+    );
+    const resumeArgv = await readFile(resume.argvPath, "utf8");
+
+    expect(continued.ok).toBe(true);
+    expect(resumeArgv).toContain("--permission-mode\nplan\n");
+    expect(resumeArgv).toContain("--no-subagents\n");
+  }, 40_000);
+
+  it("does not let a failed named continuation shadow the real latest session (X9)", async () => {
+    const dir = await tempDir();
+    const stateDir = await tempDir();
+    const missing = "00000000-0000-4000-8000-0000000dead1";
+    const review = await grokRecordingArgv(dir, "grok-review");
+    const failing = await grokRecordingArgv(dir, "grok-failing", { missingSessions: [missing] });
+    const resume = await grokRecordingArgv(dir, "grok-resume");
+
+    await withEnv({ GROK_BIN: review.bin, GROK_PLUGIN_STATE_DIR: stateDir }, () =>
+      grokReview({ cwd: dir, _workspaceRoots: [dir], target: "src/index.ts", background: false, timeoutMs: 20_000 })
+    );
+    const readOnlySession = await sessionIdOf(stateDir);
+    // A named continuation of a session the CLI no longer has. It still carries the id it asked for
+    // and the newest createdAt, and it is a `continue` job — so it can never be an origin. Letting it
+    // win "latest" made findSessionOrigin return undefined and silently defeated the fail-closed
+    // guard: the genuinely latest read-only session was then resumed unguarded.
+    const dead = envelope(
+      await withEnv({ GROK_BIN: failing.bin, GROK_PLUGIN_STATE_DIR: stateDir }, () =>
+        grokContinue({
+          cwd: dir,
+          _workspaceRoots: [dir],
+          prompt: "keep going",
+          sessionId: missing,
+          background: false,
+          timeoutMs: 20_000
+        })
+      )
+    );
+    expect(dead.error.code).toBe("session_not_found");
+
+    const escalated = envelope(
+      await withEnv({ GROK_BIN: resume.bin, GROK_PLUGIN_STATE_DIR: stateDir }, () =>
+        grokContinue({
+          cwd: dir,
+          _workspaceRoots: [dir],
+          prompt: "now fix it",
+          continueLatest: true,
+          alwaysApprove: true
+        })
+      )
+    );
+
+    expect(escalated.ok).toBe(false);
+    expect(escalated.error.code).toBe("readonly_session_escalation");
+    expect(escalated.error.details.sessionId).toBe(readOnlySession);
+    await expect(access(resume.argvPath)).rejects.toMatchObject({ code: "ENOENT" });
+  }, 60_000);
 
   it("warns instead of guessing when the session is unknown to this plugin", async () => {
     const dir = await tempDir();

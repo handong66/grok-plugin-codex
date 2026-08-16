@@ -1322,8 +1322,14 @@ export async function grokFinalize(args: {
   let sessionId = args.sessionId;
   if (!sessionId && args.jobId) {
     try {
-      const record = await new JobStore().read(args.jobId);
-      sessionId = record.grokSessionId;
+      const store = new JobStore();
+      const record = await store.read(args.jobId);
+      // X3: `record.grokSessionId` is only written up front when the CLI advertises `--session-id`.
+      // Every other run learns its id from the `end` event or from the `session_id=` the CLI prints
+      // to stderr, and that lands in the stream summary. Reading only the record made
+      // "call grok_finalize with this jobId" — the recovery this release made canonical — throw
+      // finalize_target_unknown while summary.json held the id all along.
+      sessionId = record.grokSessionId ?? (await store.readStreamProgress(args.jobId))?.grokSessionId;
       if (!sessionId) {
         throw new GrokPluginError(
           "finalize_target_unknown",

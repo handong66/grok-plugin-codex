@@ -556,6 +556,12 @@ export async function runJobWorker(jobId: string, store = new JobStore()): Promi
     latest.textChars = stdoutCapture.textChars;
     latest.finishedAt = new Date().toISOString();
     latest.waitingForAuth = waitingForAuth;
+    // X3 / SPEC §D M8: the plugin assigns the session id itself when the CLI advertises
+    // `--session-id`, but an older CLI and every `continueLatest`-derived job leave the record with
+    // no handle at all — and `grok_finalize(jobId)`, the recovery this release made canonical, can
+    // only resolve through the record. The `end` event is the primary source; the `session_id=<uuid>`
+    // the CLI prints to stderr on a tool error is the free fallback for the runs that never emit one.
+    latest.grokSessionId ??= ledger.snapshot().grokSessionId ?? sessionIdFromStderr(stderr);
     if (latest.status === "cancelled" || latest.cancelRequestedAt || cancelRequested) {
       latest.status = "cancelled";
     } else if (deviceAuthBlocked) {
