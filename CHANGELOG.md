@@ -72,6 +72,16 @@ All notable user-visible and contract changes to `grok-plugin-codex`.
 
 ### Added
 
+- **X8 / X7 — no CI, undated verification, cancel-too-early.** The repository had no `.github` at all:
+  every gate ran on the author's macOS machine, while the 0.2 audit asked for a macOS/Linux matrix and
+  the user's expectation was "push, open a PR, wait for CI". `pull-request-ci.yml` now runs
+  `npm run check` on `ubuntu-latest` and `macos-latest` and fails if the committed bundles differ from
+  a fresh build. `docs/verification.md` carries a dated record naming the CLI version, and requires one
+  per release. Tool descriptions state the typical wall time per kind (continue ~62 s, run ~129 s,
+  review ~171 s, adversarial_review ~223 s median) and say not to cancel before `timeoutMs` unless
+  `waitingForAuth` is set or the event counters have not moved for 45 s — 26 of 43 recorded cancels
+  fired before the median completion time.
+
 - **GPC-10 / GK1(3) / X10 — `grok_check` was unavailable when it was needed and reported facts it had
   not established.** `workspace_unavailable` used to kill the diagnostic itself: recorded once, with
   the caller reading the plugin's source to understand the message. `grok_check` and `grok_models` now

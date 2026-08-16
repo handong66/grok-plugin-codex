@@ -1,5 +1,11 @@
 # Verification
 
+Last verified: 2026-08-16, against Grok CLI 1.0.3 on macOS 15 (darwin 25.6.0), Node 22.
+Previous dated record: 0.2.1 was verified on 2026-07-11 against Grok CLI 1.0.3 on macOS.
+
+Every release must add a dated line here naming the CLI version it was verified against. A record
+without a date and a CLI version cannot be used to answer "did this ever work with that CLI".
+
 Mandatory checks are local and deterministic. Authenticated model calls are a separate optional gate because CLI discovery, login, model listing, and successful invocation are different facts.
 
 ## Required gate
@@ -8,6 +14,12 @@ Mandatory checks are local and deterministic. Authenticated model calls are a se
 npm run check
 git diff --check
 ```
+
+CI runs the same gate on `ubuntu-latest` and `macos-latest`
+([.github/workflows/pull-request-ci.yml](../.github/workflows/pull-request-ci.yml)) and fails if the
+committed bundles differ from a fresh build. Release candidates additionally run
+`GROK_PLUGIN_RELEASE=1 npm run validate:plugin`, which rejects a manifest still carrying the local
+`+codex.<cachebuster>` suffix.
 
 `npm run check` performs:
 

@@ -178,7 +178,10 @@ server.registerTool(
   "grok_run",
   {
     title: "Run Grok",
-    description: "Run one explicit Grok prompt in the named workspace.",
+    description:
+      "Run one explicit Grok prompt in the named workspace. Typical wall time on this machine: run ~129s " +
+      "median. Do not cancel before timeoutMs unless grok_status shows waitingForAuth or no new events " +
+      "for more than 45s.",
     inputSchema: {
       ...mutableExecutionShape,
       prompt: z.string().min(1).max(250_000)
@@ -250,7 +253,9 @@ server.registerTool(
   "grok_rescue",
   {
     title: "Grok Rescue",
-    description: "Ask Grok for an independent, enforced read-only diagnosis.",
+    description:
+      "Ask Grok for an independent, enforced read-only diagnosis. Shell execution is refused in this mode, " +
+      "so inline any command output the diagnosis needs.",
     inputSchema: {
       ...executionShape,
       problem: problemLike.optional().describe(`What went wrong and what was already tried. ${aliasNote}`),
