@@ -393,28 +393,55 @@ export function classifyGrokFailure(result: ProcessResult): string {
   return classifyGrokErrorText(text, result);
 }
 
+/**
+ * Paid-balance exhaustion. Numeric and vendor-slug signals lead; prose is the fallback. Note that
+ * none of these patterns may contain an ASCII apostrophe — the CLI writes U+2019.
+ */
+const PAID_QUOTA_MARKERS = [
+  "402 payment required",
+  "balance exhausted",
+  "quota exhausted",
+  "usage limit exceeded",
+  "run out of credits",
+  "spending-limit",
+  "personal-team-blocked"
+];
+
+/** Free-tier exhaustion: a different operator action (wait, upgrade, or route elsewhere). */
+const FREE_TIER_QUOTA_MARKERS = [
+  "reached your free",
+  "usage limit for now",
+  "need a grok subscription",
+  "get supergrok"
+];
+
+/**
+ * Auth needs positive evidence of a sign-in problem. Bare `forbidden` / `unauthorized` used to be
+ * enough, which turned any security review that discussed 403 handling into `auth_required`.
+ */
+const AUTH_MARKERS = [
+  "not logged in",
+  "not authenticated",
+  "login required",
+  "log in required",
+  "please log in",
+  "authentication required",
+  "authentication failed",
+  "invalid api key",
+  "missing api key",
+  "grok login"
+];
+
 export function classifyGrokErrorText(textValue: string, result?: Pick<ProcessResult, "signal" | "exitCode">): string {
   const text = textValue.toLowerCase();
   if (text.includes("max_turns_reached") || text.includes("max turns reached")) return "max_turns_reached";
-  if (
-    text.includes("402 payment required") ||
-    text.includes("balance exhausted") ||
-    text.includes("quota exhausted") ||
-    text.includes("usage limit exceeded")
-  ) {
-    return "quota_exhausted";
-  }
+  // Quota is checked before auth: the recorded 403 spending-limit failure was reported as
+  // `auth_required` purely because its text contains the word "forbidden".
+  if (PAID_QUOTA_MARKERS.some((marker) => text.includes(marker))) return "quota_exhausted";
+  if (FREE_TIER_QUOTA_MARKERS.some((marker) => text.includes(marker))) return "quota_free_tier";
   if (text.includes("429") || text.includes("rate limit")) return "rate_limited";
-  if (
-    text.includes("not logged in") ||
-    text.includes("not authenticated") ||
-    text.includes("login required") ||
-    text.includes("log in required") ||
-    text.includes("please log in") ||
-    text.includes("authentication required") ||
-    text.includes("unauthorized") ||
-    text.includes("forbidden")
-  ) {
+  if (AUTH_MARKERS.some((marker) => text.includes(marker))) return "auth_required";
+  if (text.includes("401") && (text.includes("unauthorized") || text.includes("authentication") || text.includes("token"))) {
     return "auth_required";
   }
   if (text.includes("session") && (text.includes("not found") || text.includes("does not exist"))) return "session_not_found";
@@ -449,10 +476,30 @@ export function CONTINUE_WITHOUT_TOOLS_REMEDY(cause: string): string {
   );
 }
 
+/** Extra, non-sensitive fields a code can contribute to `error.details`. */
+export function grokFailureDetails(code: string): Record<string, unknown> | undefined {
+  switch (code) {
+    case "quota_free_tier":
+      return {
+        retryAfterHint:
+          "Wait for the free-tier window to reset, upgrade the account, or route this task to another provider. Do not retry in this session."
+      };
+    case "quota_exhausted":
+      return { retryAfterHint: "Restore the account balance or switch accounts before retrying." };
+    default:
+      return undefined;
+  }
+}
+
 export function grokFailureMessage(code: string): string {
   switch (code) {
     case "quota_exhausted":
-      return "Grok usage balance is exhausted. Replenish the account balance or use another authorized account before retrying.";
+      return "Grok usage balance is exhausted. Replenish the account balance or use another authorized account before retrying. Do not retry with the same account.";
+    case "quota_free_tier":
+      return (
+        "The free Grok usage limit for this account is exhausted for now. Do not retry: wait for the limit " +
+        "to reset, upgrade the account, or route this task to another provider."
+      );
     case "auth_required":
       return "Grok authentication is required. Log in with the Grok CLI before retrying.";
     case "rate_limited":

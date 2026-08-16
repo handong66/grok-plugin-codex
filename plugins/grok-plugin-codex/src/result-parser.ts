@@ -2,6 +2,7 @@ import type { JobOutputSummary, JobRecord, PluginErrorInfo } from "./types.js";
 import {
   CONTINUE_WITHOUT_TOOLS_REMEDY,
   classifyGrokErrorText,
+  grokFailureDetails,
   grokFailureMessage,
   isRetryableGrokFailure
 } from "./grok-cli.js";
@@ -21,6 +22,36 @@ const CANCELLED_STOP_REASONS = new Set(["cancelled", "canceled"]);
  */
 export function sessionIdFromStderr(stderr: string): string | undefined {
   return /session_id=([0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12})/i.exec(stderr)?.[1];
+}
+
+/**
+ * GPC-04: the failure classifier is a substring matcher, so feeding it up to 1MB of Grok's own
+ * review prose made "forbidden", "unauthorized", and "not logged in" — ordinary words in a security
+ * review — decide the error code. Only vendor-emitted error events belong on that input face.
+ */
+export function errorEventText(stdout: string): string {
+  const messages: string[] = [];
+  for (const line of stdout.split(/\r?\n/)) {
+    if (!line.trim()) continue;
+    let parsed: unknown;
+    try {
+      parsed = JSON.parse(line);
+    } catch {
+      continue;
+    }
+    const event = nestedRecord(parsed);
+    if (!event) continue;
+    const type = stringValue(event.type);
+    if (type !== "error" && type !== "max_turns_reached" && event.error === undefined) continue;
+    if (type === "max_turns_reached") {
+      messages.push("max_turns_reached");
+      continue;
+    }
+    const raw = event.error ?? event.message ?? event.data;
+    if (raw === undefined) continue;
+    messages.push(typeof raw === "string" ? raw : JSON.stringify(raw));
+  }
+  return messages.join("\n");
 }
 
 function previewText(text: string): string {
@@ -61,10 +92,12 @@ function streamErrorFrom(event: Record<string, unknown>): PluginErrorInfo | unde
   const message = typeof raw === "string" ? raw : JSON.stringify(raw);
   const code = classifyGrokErrorText(message);
   const publicCode = code === "unknown" ? "cli_stream_error" : code;
+  const details = grokFailureDetails(code);
   return {
     code: publicCode,
     message: code === "unknown" ? "Grok emitted an unclassified streaming error event." : grokFailureMessage(code),
-    retryable: code === "unknown" || isRetryableGrokFailure(code)
+    retryable: code === "unknown" || isRetryableGrokFailure(code),
+    ...(details ? { details } : {})
   };
 }
 

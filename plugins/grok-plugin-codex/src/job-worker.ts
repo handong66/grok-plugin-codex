@@ -8,6 +8,7 @@ import {
   buildGrokProcessEnv,
   buildWorkerEnv,
   classifyGrokFailure,
+  grokFailureDetails,
   grokFailureMessage,
   isRetryableGrokFailure,
   signalPidTree,
@@ -15,7 +16,7 @@ import {
 } from "./grok-cli.js";
 import { JobStore } from "./job-store.js";
 import type { PathRedactor } from "./redact.js";
-import { summarizeGrokOutput } from "./result-parser.js";
+import { errorEventText, summarizeGrokOutput } from "./result-parser.js";
 import type { JobRecord } from "./types.js";
 
 const MAX_CAPTURE_CHARS = 1_000_000;
@@ -383,18 +384,23 @@ export async function runJobWorker(jobId: string, store = new JobStore()): Promi
             args: latest.args,
             exitCode: outcome.exitCode,
             signal: outcome.signal,
-            stdout,
+            // Never the whole stream: only vendor error events, so Grok's own review prose cannot
+            // decide the error code (GPC-04).
+            stdout: errorEventText(stdout),
             stderr,
             durationMs: Date.now() - Date.parse(latest.startedAt ?? latest.createdAt),
             stdoutTruncated: outputTruncated,
             stderrTruncated: outputTruncated,
             timedOut: false
           });
+          const codeDetails = grokFailureDetails(code);
           latest.error = {
             code,
             message: grokFailureMessage(code),
             retryable: isRetryableGrokFailure(code),
-            ...(teardownError ? { details: { phase: "run", teardownError } } : {})
+            ...(teardownError || codeDetails
+              ? { details: { phase: "run", ...codeDetails, ...(teardownError ? { teardownError } : {}) } }
+              : {})
           };
         }
       }

@@ -6,6 +6,19 @@ All notable user-visible and contract changes to `grok-plugin-codex`.
 
 ### Fixed
 
+- **GPC-04 — quota exhaustion reported as retryable, or as an auth problem.** The quota patterns matched none
+  of the vendor's real texts (the CLI writes `You’ve` with U+2019, so an ASCII-apostrophe pattern never fired),
+  and a bare `includes("forbidden")` turned a 403 spending-limit into `auth_required` — 11 of 64 failures
+  carried the wrong code and the wrong advice. Quota is now checked before auth and matches the recorded
+  strings (`run out of credits`, `spending-limit`, `personal-team-blocked`, `reached your free`,
+  `usage limit for now`, `need a grok subscription`, `get supergrok`). **New code `quota_free_tier`** separates
+  a free-limit stop (wait, upgrade, or route elsewhere) from `quota_exhausted` (paid balance / 402); both are
+  `retryable: false` and carry `error.details.retryAfterHint`. The auth branch now needs positive evidence of a
+  sign-in problem — bare `forbidden` / `unauthorized` no longer qualify, so a security review that discusses
+  403 handling is not misreported.
+- **GPC-04 — classifier input face.** The worker fed up to 1 MB of Grok's own answer to a substring-matching
+  classifier. It now passes only stderr plus the text of vendor `error` events (`errorEventText`).
+
 - **GPC-M2 — `grok_continue` dropped the read-only constraint (security).** `grokContinue` never set
   `readOnly`, so a continuation never received `--permission-mode plan --no-subagents`, and because it uses
   the mutable execution shape it also accepted `alwaysApprove`. All 40 recorded continues ran without plan
