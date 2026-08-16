@@ -90,6 +90,8 @@ function describeFailure(
 class StreamLedger {
   private readonly facts: MutableStreamFacts = createStreamFacts();
   private readonly redactInspectedPath: PathRedactor;
+  /** M3: SKILL.md files under the job's own workspace belong to the target, not to a loaded persona. */
+  private readonly workspaceDir: string;
   private pendingLine = "";
   private pendingText = "";
   private writtenTextChars = 0;
@@ -99,6 +101,7 @@ class StreamLedger {
 
   constructor(redact: PathRedactor, cwd: string) {
     this.redactInspectedPath = exemptWorkspacePaths(redact, cwd);
+    this.workspaceDir = cwd;
   }
 
   append(chunk: string): void {
@@ -117,7 +120,7 @@ class StreamLedger {
 
   private observe(line: string): void {
     if (!line.trim()) return;
-    const text = observeStreamLine(line, this.facts, this.redactInspectedPath);
+    const text = observeStreamLine(line, this.facts, this.redactInspectedPath, this.workspaceDir);
     this.facts.lastEventAt = new Date().toISOString();
     if (text === undefined) return;
     if (this.writtenTextChars + this.pendingText.length + text.length > MAX_FINAL_TEXT_LEDGER_CHARS) {

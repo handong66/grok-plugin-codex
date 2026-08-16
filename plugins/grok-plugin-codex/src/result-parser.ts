@@ -1,3 +1,4 @@
+import { isAbsolute, relative, resolve, sep } from "node:path";
 import { jobWasReadOnly, type JobOutputSummary, type JobRecord, type PluginErrorInfo } from "./types.js";
 import {
   CONTINUE_WITHOUT_TOOLS_REMEDY,
@@ -105,18 +106,35 @@ export function errorEventText(stdout: string): string {
  * burning the budget the task needed. 57 of 128 recorded runs did exactly that, so the loads are
  * counted and surfaced instead of being invisible.
  */
-const SKILL_LOAD_PATTERNS = [
-  /(?:\.grok|\.claude|\.codex|opencode)\/skills\/([A-Za-z0-9_.:-]+)/g,
-  /([A-Za-z0-9_.:-]+)\/SKILL\.md/g
-];
+/** A persona directory the delegate chose to enter, wherever it lives. */
+const SKILL_DIRECTORY_PATTERN = /(?:\.grok|\.claude|\.codex|opencode)\/skills\/([A-Za-z0-9_.:-]+)/g;
+/**
+ * M3: the second rule used to be the bare `<name>/SKILL.md`, which matches the reviewed repository's
+ * own bundled skill — this repository is a direct hit — so reviewing a plugin repo reported the
+ * target's files as a persona the delegate had loaded, and warned about budget it never spent.
+ * A file the delegate went outside the workspace to read is the evidence X1 is about, so the path
+ * must be absolute (a relative one is by definition inside the workspace) and outside `record.cwd`.
+ */
+const SKILL_FILE_PATTERN = /(?<![A-Za-z0-9_.:~\/-])(~?\/[A-Za-z0-9_.:\-\/]*?([A-Za-z0-9_.:-]+)\/SKILL\.md)/g;
 
-function collectSkillLoads(line: string, into: Set<string>): void {
-  for (const pattern of SKILL_LOAD_PATTERNS) {
-    pattern.lastIndex = 0;
-    for (let match = pattern.exec(line); match; match = pattern.exec(line)) {
-      const name = match[1];
-      if (name && name !== "skills") into.add(name);
-    }
+function isWithinWorkspace(workspaceDir: string | undefined, path: string): boolean {
+  if (!workspaceDir) return false;
+  const relativePath = relative(resolve(workspaceDir), resolve(path));
+  return relativePath === "" || (!relativePath.startsWith(`..${sep}`) && relativePath !== ".." && !isAbsolute(relativePath));
+}
+
+function collectSkillLoads(line: string, into: Set<string>, workspaceDir?: string): void {
+  SKILL_DIRECTORY_PATTERN.lastIndex = 0;
+  for (let match = SKILL_DIRECTORY_PATTERN.exec(line); match; match = SKILL_DIRECTORY_PATTERN.exec(line)) {
+    const name = match[1];
+    if (name && name !== "skills") into.add(name);
+  }
+  SKILL_FILE_PATTERN.lastIndex = 0;
+  for (let match = SKILL_FILE_PATTERN.exec(line); match; match = SKILL_FILE_PATTERN.exec(line)) {
+    const [, path, name] = match;
+    if (!name || name === "skills") continue;
+    if (path.startsWith("/") && isWithinWorkspace(workspaceDir, path)) continue;
+    into.add(name);
   }
 }
 
@@ -312,7 +330,9 @@ export function createStreamFacts(): MutableStreamFacts {
 export function observeStreamLine(
   line: string,
   facts: MutableStreamFacts,
-  redactInspectedPath: PathRedactor
+  redactInspectedPath: PathRedactor,
+  /** M3: the workspace the job ran in; a SKILL.md inside it belongs to the target, not to a persona. */
+  workspaceDir?: string
 ): string | undefined {
   if (!line.trim()) return undefined;
   let parsed: unknown;
@@ -329,7 +349,7 @@ export function observeStreamLine(
   facts.streamError ??= streamErrorFrom(event);
 
   if (eventType.startsWith("tool_call") || eventType === "tool_use") {
-    collectSkillLoads(line, facts.skillsLoaded);
+    collectSkillLoads(line, facts.skillsLoaded, workspaceDir);
     facts.toolEventCount += 1;
     const id = toolCallIdOf(event);
     if (id) facts.toolCallIds.add(id);
@@ -373,9 +393,13 @@ export function freezeStreamFacts(facts: MutableStreamFacts): StreamFacts {
   };
 }
 
-export function scanGrokStream(stdout: string, redactInspectedPath: PathRedactor): StreamFacts {
+export function scanGrokStream(
+  stdout: string,
+  redactInspectedPath: PathRedactor,
+  workspaceDir?: string
+): StreamFacts {
   const facts = createStreamFacts();
-  for (const line of stdout.split(/\r?\n/)) observeStreamLine(line, facts, redactInspectedPath);
+  for (const line of stdout.split(/\r?\n/)) observeStreamLine(line, facts, redactInspectedPath, workspaceDir);
   return freezeStreamFacts(facts);
 }
 
@@ -391,7 +415,7 @@ export function summarizeGrokOutput(
 ): JobOutputSummary {
   /** Files inside the workspace this job ran in are the caller's own location and stay verbatim. */
   const redactInspectedPath = exemptWorkspacePaths(redact, record.cwd);
-  const facts = precomputed ?? scanGrokStream(stdout, redactInspectedPath);
+  const facts = precomputed ?? scanGrokStream(stdout, redactInspectedPath, record.cwd);
   const {
     eventCounts,
     grokSessionId: endSessionId,

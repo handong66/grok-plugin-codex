@@ -119,6 +119,54 @@ describe("headless delegation preamble (X1)", () => {
     expect(summary.resultComplete).toBe(true);
   });
 
+  /**
+   * M3. The old `<name>/SKILL.md` rule matched any path, so reviewing a repository that ships a
+   * skill — this one does — reported the *target's* own files as a persona the delegate had loaded,
+   * and warned about budget it never spent. The signal X1 is about is a skill file the delegate went
+   * outside the workspace to read.
+   */
+  it("does not count the reviewed repository's own SKILL.md as a loaded persona", () => {
+    const stream = [
+      JSON.stringify({
+        type: "tool_call",
+        toolCallId: "t1",
+        toolName: "read_file",
+        rawInput: { path: "/repo/plugins/grok-plugin-codex/skills/grok/SKILL.md" }
+      }),
+      JSON.stringify({
+        type: "tool_call",
+        toolCallId: "t2",
+        toolName: "read_file",
+        rawInput: { path: "skills/grok/SKILL.md" }
+      }),
+      JSON.stringify({ type: "text", data: "answer" }),
+      JSON.stringify({ type: "end", stopReason: "end_turn" })
+    ].join("\n");
+
+    const summary = summarizeGrokOutput(record("review"), stream);
+
+    expect(summary.skillsLoaded).toEqual([]);
+    expect(summary.warnings).toEqual([]);
+  });
+
+  it("still counts a skill file read from outside the workspace", () => {
+    const stream = [
+      JSON.stringify({
+        type: "tool_call",
+        toolCallId: "t1",
+        toolName: "read_file",
+        rawInput: { path: "/Users/dev/Dong-skills/skills/grok-codex-collaboration/SKILL.md" }
+      }),
+      JSON.stringify({ type: "text", data: "answer" }),
+      JSON.stringify({ type: "end", stopReason: "end_turn" })
+    ].join("\n");
+
+    const summary = summarizeGrokOutput(record("review"), stream);
+
+    expect(summary.skillsLoaded).toEqual(["grok-codex-collaboration"]);
+    expect(summary.warnings.join(" ")).toContain("interactive skill file");
+  });
+
   it("reports no skill loads for an ordinary stream", () => {
     const stream = [
       JSON.stringify({ type: "tool_call", toolCallId: "t1", rawInput: { path: "/repo/src/index.ts" } }),
