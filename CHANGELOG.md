@@ -290,8 +290,10 @@ as `true` / `false` / `"unknown"` rather than `null`; new tool `grok_finalize`; 
   `30000`) to block server-side until the job is terminal, reporting **`data.waited`**. It shares the
   staleness rules of a plain status call, so a run whose worker is gone can still be reaped by it.
   `grok_result` accepts **`finalTextOffset` / `finalTextMaxChars`** and returns `finalTextChars` plus
-  `finalTextNextOffset`; the window applies to `outputSummary.finalText` too, so the answer is no
-  longer serialised twice in one envelope. The `includeRawTail: false` default is the one shared with
+  `finalTextNextOffset`; the window applies to `outputSummary.finalText` as well as to `finalText`, so
+  a paged call no longer ships the whole answer alongside the page it asked for. (Both fields still
+  carry the same window, so an unpaged call still serialises the answer twice; use
+  `finalTextMaxChars` when that matters.) The `includeRawTail: false` default is the one shared with
   GPC-03a, implemented once.
 
 - **GPC-M3 — `JobStore.status()` could kill a healthy job.** `status()` terminates the process tree of
