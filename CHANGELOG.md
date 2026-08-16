@@ -81,6 +81,14 @@ as `true` / `false` / `"unknown"` rather than `null`; new tool `grok_finalize`; 
 
 ### Added
 
+- **X9 — the same rules were re-read 175 times.** Codex opened the bundled `SKILL.md` 175 times across
+  58 sessions to recover the same facts. `grok_check` now returns them as `data.contract`: the
+  per-kind `background` and `timeoutMs` defaults, that there is no `maxTurns` default, what counts as a
+  complete answer, that a zero-tool-call review is `no_evidence_review`, which kinds are read-only and
+  that shell execution is disabled in them, and that `grok_finalize` is the recovery. `contractVersion`
+  is `3`. The bundled skill keeps only contract facts; orchestration rhythm lives in the tool
+  descriptions and the README.
+
 - **X8 / X7 — no CI, undated verification, cancel-too-early.** The repository had no `.github` at all:
   every gate ran on the author's macOS machine, while the 0.2 audit asked for a macOS/Linux matrix and
   the user's expectation was "push, open a PR, wait for CI". `pull-request-ci.yml` now runs

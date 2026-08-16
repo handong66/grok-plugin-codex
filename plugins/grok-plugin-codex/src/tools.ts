@@ -979,7 +979,19 @@ export async function grokCheck(args: {
     const probe = await probeGrokCapabilities(discovered.bin, { timeoutMs: args.timeoutMs ?? 5_000 });
     const base = {
       pluginVersion: PLUGIN_VERSION,
-      contractVersion: "2",
+      contractVersion: "3",
+      // X9: Codex re-read the bundled SKILL.md 175 times across 58 sessions to recover these same
+      // facts. They are cheap to state here, where the caller already looks before delegating.
+      contract: {
+        backgroundDefault: BACKGROUND_DEFAULT_BY_KIND,
+        timeoutMsDefault: DEFAULT_TIMEOUT_MS_BY_KIND,
+        maxTurnsDefault: null,
+        completeAnswer: "data.resultComplete === true, and data.finalText is the answer",
+        reviewNeedsEvidence: "review and adversarial_review with toolCallCount 0 are no_evidence_review",
+        recoveryTool: "grok_finalize",
+        readOnlyKinds: ["review", "adversarial_review", "rescue"],
+        shellDisabledInReadOnly: true
+      },
       cliDiscovered: true,
       version: discovered.version,
       capabilities: probe.capabilities,

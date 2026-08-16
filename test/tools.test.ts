@@ -65,7 +65,11 @@ describe("Grok tool handlers", () => {
     expect(parsed.data.modelsListed).toBe(true);
     expect(parsed.data.modelInvocationTested).toBe(false);
     expect(parsed.data.callable).toBeNull();
-    expect(parsed.data.contractVersion).toBe("2");
+    expect(parsed.data.contractVersion).toBe("3");
+    // X9: the per-turn rules are readable from the check output, not only from the bundled skill.
+    expect(parsed.data.contract.recoveryTool).toBe("grok_finalize");
+    expect(parsed.data.contract.backgroundDefault.review).toBe(true);
+    expect(parsed.data.contract.timeoutMsDefault.adversarial_review).toBe(300_000);
   });
 
   it("grok_check reports an authenticated-model probe failure as a typed business error", async () => {
