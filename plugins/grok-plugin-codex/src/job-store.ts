@@ -618,6 +618,31 @@ export class JobStore {
     return origin ? { ...origin, grokSessionId: latest.grokSessionId } : undefined;
   }
 
+  /**
+   * GK8: `session_not_found` told the caller to "list sessions and select an existing session ID",
+   * but the id it was holding was often the only handle it had. These are the sessions this plugin
+   * actually started in the same workspace, newest first — a usable candidate list, not a suggestion
+   * to go and look one up.
+   */
+  async listRecentSessionIds(cwd: string, limit = 5): Promise<string[]> {
+    await this.ensure();
+    const workspace = resolve(cwd);
+    const entries = await readdir(this.jobsDir(), { withFileTypes: true }).catch(() => []);
+    const found: { grokSessionId: string; createdAt: number }[] = [];
+    for (const entry of entries) {
+      if (!entry.isFile() || !entry.name.endsWith(".json")) continue;
+      const jobId = entry.name.slice(0, -5);
+      if (!JOB_ID_PATTERN.test(jobId)) continue;
+      const record = await this.read(jobId).catch(() => null);
+      if (!record?.grokSessionId || resolve(record.cwd) !== workspace) continue;
+      found.push({ grokSessionId: record.grokSessionId, createdAt: Date.parse(record.createdAt) || 0 });
+    }
+    return [...new Set(found.sort((a, b) => b.createdAt - a.createdAt).map((entry) => entry.grokSessionId))].slice(
+      0,
+      limit
+    );
+  }
+
   async startGrokJob(params: {
     kind: JobKind;
     cwd: string;

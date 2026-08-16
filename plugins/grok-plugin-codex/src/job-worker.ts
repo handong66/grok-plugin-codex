@@ -574,12 +574,23 @@ export async function runJobWorker(jobId: string, store = new JobStore()): Promi
             timedOut: false
           });
           const codeDetails = grokFailureDetails(code);
+          // GK8: the caller's session id is often its only handle, so the failure carries the ids
+          // this plugin actually started in the same workspace instead of telling it to go looking.
+          const candidateSessions =
+            code === "session_not_found" ? await store.listRecentSessionIds(latest.cwd).catch(() => []) : [];
           latest.error = {
             code,
             message: grokFailureMessage(code),
             retryable: isRetryableGrokFailure(code),
-            ...(teardownError || codeDetails
-              ? { details: { phase: "run", ...codeDetails, ...(teardownError ? { teardownError } : {}) } }
+            ...(teardownError || codeDetails || candidateSessions.length
+              ? {
+                  details: {
+                    phase: "run",
+                    ...codeDetails,
+                    ...(candidateSessions.length ? { candidateSessions } : {}),
+                    ...(teardownError ? { teardownError } : {})
+                  }
+                }
               : {})
           };
         }

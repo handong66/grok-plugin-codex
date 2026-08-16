@@ -54,6 +54,7 @@ const expectedSchemas = {
       "alwaysApprove",
       "background",
       "continueLatest",
+      "fallbackToLatest",
       "cwd",
       "disableWebSearch",
       "maxTurns",

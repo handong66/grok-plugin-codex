@@ -507,7 +507,11 @@ export function grokFailureMessage(code: string): string {
     case "rate_limited":
       return "Grok rate-limited the request. Retry after the provider limit resets.";
     case "session_not_found":
-      return "The requested Grok session was not found. List sessions and select an existing session ID.";
+      return (
+        "The Grok CLI no longer has that session. error.details.candidateSessions lists the sessions this " +
+        "plugin started in the same workspace, newest first; or retry with fallbackToLatest: true to " +
+        "continue the latest session in this workspace."
+      );
     case "model_unavailable":
       return "The requested Grok model is unavailable or unauthorized. Verify it with the current account.";
     case "cli_incompatible":

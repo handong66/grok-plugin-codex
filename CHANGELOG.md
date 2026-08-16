@@ -72,6 +72,24 @@ All notable user-visible and contract changes to `grok-plugin-codex`.
 
 ### Added
 
+- **GK6 — `private_path_blocked` did not say what matched, or what to do instead.** Three recorded
+  refusals each forced a full rewrite of the target. `error.details.blockedPath` now names the matched
+  path (only the path — never the surrounding prompt), and the message points at `~/.grok/skills` as
+  the Grok-native alternative, matching the remedy the sibling opencode plugin already gave.
+- **GK7 — `workspace_unavailable` was non-retryable, and retrying fixed it.** Codex supplies workspace
+  roots per turn; a turn without them failed every workspace tool as a permanent error, and the
+  recorded incident shows the identical call succeeding moments later — after the caller had gone
+  round the plugin and run the CLI directly. It is now **`retryable: true`**, its message says the
+  roots arrive per turn and that the fix is to retry (restart the server only if it persists), and
+  `error.details` carries `listRootsSupported`, `listRootsCount`, `codexMetaRootsCount`,
+  `requestedCwd`. The server also remembers the last non-empty root set in-process and reuses it for a
+  turn that carries none, with a warning; installing a new roots provider clears it.
+- **GK8 — `session_not_found` had no fallback.** `grok_continue` accepts **`fallbackToLatest`**, which
+  retries once against the latest session in the same `cwd` and warns that the answer may belong to
+  other work (foreground only — a background start returns before the failure exists). The failure's
+  `error.details.candidateSessions` now lists the sessions this plugin started in that workspace,
+  newest first, instead of telling the caller to go and list sessions.
+
 - **GPC-11 — sibling-plugin field name accepted (contract).** The recorded schema failure was
   `expected string, received undefined`: the field was missing, because one script fanned the same
   review out to two sibling plugins and used the opencode plugin's name, `prompt`, for both.

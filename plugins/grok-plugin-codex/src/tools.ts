@@ -41,6 +41,13 @@ export type CommonArgs = {
 
 type WorkspaceRootsProvider = () => Promise<string[]>;
 let workspaceRootsProvider: WorkspaceRootsProvider = async () => [process.cwd()];
+/**
+ * GK7: Codex supplies workspace roots per turn, and a turn that omits them made every workspace tool
+ * fail with a non-retryable `workspace_unavailable` — recorded once, immediately followed by the same
+ * call succeeding, and by the caller giving up on the plugin and running the CLI directly. The last
+ * non-empty set is remembered in-process and used only when the current turn supplies nothing at all.
+ */
+let lastKnownWorkspaceRoots: string[] = [];
 
 const COMPOSER_FAST_MODEL = "grok-composer-2.5-fast";
 /**
@@ -193,6 +200,8 @@ export function buildRecovery(params: {
 
 export function configureWorkspaceRootsProvider(provider: WorkspaceRootsProvider): void {
   workspaceRootsProvider = provider;
+  // A new provider is a new client session, so nothing learned from the old one may be reused.
+  lastKnownWorkspaceRoots = [];
 }
 
 function isWithin(root: string, candidate: string): boolean {
@@ -200,8 +209,16 @@ function isWithin(root: string, candidate: string): boolean {
   return relativePath === "" || (!relativePath.startsWith(`..${sep}`) && relativePath !== ".." && !isAbsolute(relativePath));
 }
 
-async function canonicalWorkspaceRoots(requestRoots: string[] = []): Promise<string[]> {
-  const provided = [...new Set([...(await workspaceRootsProvider()), ...requestRoots])];
+async function canonicalWorkspaceRoots(
+  requestRoots: string[] = [],
+  options: { allowRemembered?: boolean; onRemembered?: () => void; counts?: { listRoots: number; codexMeta: number } } = {}
+): Promise<string[]> {
+  const listed = await workspaceRootsProvider();
+  if (options.counts) {
+    options.counts.listRoots = listed.length;
+    options.counts.codexMeta = requestRoots.length;
+  }
+  const provided = [...new Set([...listed, ...requestRoots])];
   const roots: string[] = [];
   for (const root of provided) {
     try {
@@ -211,17 +228,48 @@ async function canonicalWorkspaceRoots(requestRoots: string[] = []): Promise<str
       // Ignore stale client roots; a valid root is still required below.
     }
   }
-  return [...new Set(roots)];
+  const unique = [...new Set(roots)];
+  if (unique.length) {
+    lastKnownWorkspaceRoots = unique;
+    return unique;
+  }
+  if (options.allowRemembered && lastKnownWorkspaceRoots.length) {
+    options.onRemembered?.();
+    return lastKnownWorkspaceRoots;
+  }
+  return unique;
 }
 
 async function resolveWorkspaceCwd(
   cwd: string,
   requestRoots: string[] = [],
-  allowCodexPrivatePaths = false
+  allowCodexPrivatePaths = false,
+  onWarning?: (warning: string) => void
 ): Promise<string> {
-  const roots = await canonicalWorkspaceRoots(requestRoots);
+  const counts = { listRoots: 0, codexMeta: 0 };
+  const roots = await canonicalWorkspaceRoots(requestRoots, {
+    allowRemembered: true,
+    counts,
+    onRemembered: () =>
+      onWarning?.(
+        "This turn carried no workspace roots, so the boundary check reused the root set this MCP " +
+          "server was given on an earlier turn. Pass the workspace metadata again if the workspace changed."
+      )
+  });
   if (!roots.length) {
-    throw new GrokPluginError("workspace_unavailable", "The MCP client did not provide a valid filesystem workspace root.");
+    throw new GrokPluginError(
+      "workspace_unavailable",
+      "This turn carried no workspace roots. Codex supplies them per turn, so this is usually a timing " +
+        "gap rather than a configuration error: retry the same call. If it keeps happening, restart the " +
+        "MCP server.",
+      true,
+      {
+        listRootsSupported: true,
+        listRootsCount: counts.listRoots,
+        codexMetaRootsCount: counts.codexMeta,
+        requestedCwd: cwd
+      }
+    );
   }
   let candidate: string;
   try {
@@ -238,7 +286,12 @@ async function resolveWorkspaceCwd(
   if (!allowCodexPrivatePaths) {
     const codexHome = await realpath(process.env.CODEX_HOME ?? join(homedir(), ".codex")).catch(() => null);
     if (codexHome && isWithin(codexHome, candidate)) {
-      throw new GrokPluginError("private_path_blocked", "The requested working directory is inside the private Codex runtime directory.");
+      throw new GrokPluginError(
+        "private_path_blocked",
+        privateCodexPathMessage(),
+        false,
+        { blockedPath: candidate, source: "cwd" }
+      );
     }
   }
   return candidate;
@@ -246,6 +299,7 @@ async function resolveWorkspaceCwd(
 
 async function resolveDiscoveryCwd(cwd?: string, requestRoots: string[] = []): Promise<string> {
   if (cwd) return await resolveWorkspaceCwd(cwd, requestRoots);
+
   const roots = await canonicalWorkspaceRoots(requestRoots);
   return roots[0] ?? process.cwd();
 }
@@ -311,17 +365,31 @@ async function guarded<T>(operation: () => Promise<T>): Promise<T | ReturnType<t
   }
 }
 
+/**
+ * GK6: the message said what was refused but never which substring matched, so the caller had to
+ * rewrite the whole target — three times in the recorded window. It also gave no alternative, while
+ * the sibling opencode plugin's version already named one.
+ */
 function privateCodexPathMessage(): string {
   return (
-    "Prompt asks Grok to read Codex private runtime paths such as ~/.codex. " +
-    "Inline only visible task context or explicitly authorize the private path risk."
+    "The prompt asks Grok to read Codex private runtime paths such as ~/.codex. " +
+    "error.details.blockedPath names the matched path. Inline the visible task context instead, use " +
+    "Grok-native skill paths under ~/.grok/skills, or explicitly authorize the private path risk with " +
+    "allowCodexPrivatePaths."
   );
 }
 
 export function validatePromptBoundary(prompt: string, allowCodexPrivatePaths?: boolean): void {
   if (allowCodexPrivatePaths) return;
-  const pattern = /(?:^|[\s"'`(])(?:~|\$HOME|\/[^\s"'`)]+)\/\.codex(?:\/|\b)/;
-  if (pattern.test(prompt)) throw new GrokPluginError("private_path_blocked", privateCodexPathMessage());
+  const pattern = /(?:^|[\s"'`(])((?:~|\$HOME|\/[^\s"'`)]+)\/\.codex(?:\/[^\s"'`)]*)?)/;
+  const match = pattern.exec(prompt);
+  // Only the matched path is echoed, never the surrounding prompt text.
+  if (match) {
+    throw new GrokPluginError("private_path_blocked", privateCodexPathMessage(), false, {
+      blockedPath: match[1],
+      source: "prompt"
+    });
+  }
 }
 
 function validateSessionId(sessionId: string): void {
@@ -446,10 +514,15 @@ async function runOrStartJob(params: CommonArgs & {
   readOnly?: boolean;
 }) {
   return await guarded(async () => {
-    const cwd = await resolveWorkspaceCwd(params.cwd, params._workspaceRoots, params.allowCodexPrivatePaths);
+    const inheritedWarnings: string[] = [];
+    const cwd = await resolveWorkspaceCwd(
+      params.cwd,
+      params._workspaceRoots,
+      params.allowCodexPrivatePaths,
+      (warning) => inheritedWarnings.push(warning)
+    );
     validatePromptBoundary(params.prompt, params.allowCodexPrivatePaths);
     let readOnly = params.readOnly ?? false;
-    const inheritedWarnings: string[] = [];
     const store = new JobStore();
     await assertStateOutsideWorkspace(store, cwd, params._workspaceRoots);
     if (process.platform !== "darwin" && process.platform !== "linux") {
@@ -876,8 +949,40 @@ export async function grokRun(args: CommonArgs & { prompt: string }) {
   return await runOrStartJob({ ...args, kind: "run" });
 }
 
-export async function grokContinue(args: CommonArgs & { prompt: string; sessionId?: string; continueLatest?: boolean }) {
-  return await runOrStartJob({ ...args, kind: "continue" });
+export async function grokContinue(
+  args: CommonArgs & { prompt: string; sessionId?: string; continueLatest?: boolean; fallbackToLatest?: boolean }
+) {
+  const result = await runOrStartJob({ ...args, kind: "continue" });
+  // GK8: a resume against a session the CLI no longer has is a 2.5s death, and the id the caller
+  // holds is often its only handle. The retry is only possible on the path that waited for the
+  // outcome; a background start returns before the failure exists, and says so in the schema.
+  if (
+    args.fallbackToLatest !== true ||
+    args.continueLatest === true ||
+    args.background === true ||
+    !("isError" in result) ||
+    !result.isError
+  ) {
+    return result;
+  }
+  const envelope = result.structuredContent as { error?: { code?: string } } | undefined;
+  if (envelope?.error?.code !== "session_not_found") return result;
+  const retried = await runOrStartJob({
+    ...args,
+    kind: "continue",
+    sessionId: undefined,
+    continueLatest: true
+  });
+  if ("structuredContent" in retried && retried.structuredContent) {
+    const retriedEnvelope = retried.structuredContent as { warnings?: string[] };
+    retriedEnvelope.warnings = [
+      `Session ${args.sessionId} no longer exists in the Grok CLI, so fallbackToLatest continued the ` +
+        "latest session in this workspace instead. Confirm the answer belongs to the work you meant.",
+      ...(retriedEnvelope.warnings ?? [])
+    ];
+    (retried.content[0] as { text: string }).text = JSON.stringify(retriedEnvelope, null, 2);
+  }
+  return retried;
 }
 
 /**

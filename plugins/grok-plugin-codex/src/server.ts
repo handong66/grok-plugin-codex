@@ -200,6 +200,15 @@ server.registerTool(
       ...mutableExecutionShape,
       sessionId: z.string().trim().min(1).max(256).optional(),
       continueLatest: z.boolean().optional(),
+      fallbackToLatest: z
+        .boolean()
+        .optional()
+        .describe(
+          "When a named sessionId no longer exists in the Grok CLI, retry once against the latest session " +
+            "in this cwd and warn. Only applies to a foreground call (background: false, the default for " +
+            "this tool); a background start returns before the failure is known, and error.details." +
+            "candidateSessions then lists the sessions this plugin started here."
+        ),
       prompt: z.string().min(1).max(250_000)
     },
     outputSchema
