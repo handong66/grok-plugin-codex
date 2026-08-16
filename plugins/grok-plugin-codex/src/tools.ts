@@ -1077,9 +1077,14 @@ export async function grokCheck(args: {
       invocation = await runInvocationProbe(discovered.bin, cwd, args.model, args.timeoutMs);
       if (!invocation.callable && invocation.failureReason) warnings.push(invocation.failureReason);
     }
+    // X16: a probe that failed on quota has *determined* the entitlement. It used to be discarded,
+    // so an exhausted account whose `grok models` still lists models reported `entitled: "unknown"` —
+    // publishing "this check did not establish it" for a fact the check had just established.
+    const probeExhausted = invocation?.failureCode?.startsWith("quota_") === true;
     const probed = invocation
       ? {
           ...base,
+          entitled: probeExhausted ? false : base.entitled,
           modelInvocationTested: invocation.modelInvocationTested,
           callable: invocation.callable,
           observedStopReason: invocation.observedStopReason,
@@ -1108,7 +1113,8 @@ export async function grokCheck(args: {
       });
     }
     const quotaCode = classifyGrokErrorText(`${models.stdout}\n${models.stderr}`);
-    const entitled = quotaCode.startsWith("quota_") ? false : invocation?.callable === true ? true : "unknown";
+    const entitled =
+      quotaCode.startsWith("quota_") || probeExhausted ? false : invocation?.callable === true ? true : "unknown";
     if (args.model && parsed.availableModels.length && !parsed.availableModels.some((model) => model.id === args.model)) {
       warnings.push(
         `model "${args.model}" is not in the list this Grok CLI reports ` +

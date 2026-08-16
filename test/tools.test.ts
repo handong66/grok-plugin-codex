@@ -363,6 +363,71 @@ printf '%s\n' '{"type":"text","data":"OK"}' '{"type":"end","stopReason":"cancell
     expect(parsed.warnings.join(" ")).toContain("normal end turn");
   });
 
+  /**
+   * X16. The probe used to report only `exited N`, discarding the CLI's own error events and stderr.
+   * An account whose paid balance is gone still lists models fine, so `grok models` succeeded and
+   * `entitled` came back `"unknown"` — an undetermined fact standing in for one the probe had just
+   * determined, on the one call the caller explicitly paid quota to make.
+   */
+  it("grok_check reads why the invocation probe failed instead of only its exit code", async () => {
+    const dir = await tempDir();
+    const grokBin = await makeExecutable(
+      join(dir, "grok"),
+      `#!/bin/sh
+if [ "$1" = "--version" ]; then echo "grok fake 1.0.3"; exit 0; fi
+if [ "$1" = "--help" ]; then
+  echo "--prompt-file --output-format streaming-json --permission-mode plan --no-subagents --disable-web-search"
+  exit 0
+fi
+if { [ "$1" = "models" ]; } || { [ "$1" = "--cwd" ] && [ "$3" = "models" ]; }; then
+  echo "You are logged in with grok.com."
+  echo "Default model: grok-4.6"
+  exit 0
+fi
+printf '%s\\n' '{"type":"error","error":"402 Payment Required: balance exhausted"}'
+exit 1
+`
+    );
+
+    const parsed = envelope(
+      await withEnv({ GROK_BIN: grokBin }, () => grokCheck({ cwd: dir, ...roots(dir), probeInvocation: true }))
+    );
+
+    expect(parsed.ok).toBe(true);
+    expect(parsed.data.callable).toBe(false);
+    // `grok models` succeeded, so listing alone would have said nothing about quota.
+    expect(parsed.data.modelsListed).toBe(true);
+    expect(parsed.data.authenticated).toBe(true);
+    expect(parsed.data.entitled).toBe(false);
+    expect(parsed.warnings.join(" ")).toContain("quota_exhausted");
+    expect(parsed.warnings.join(" ")).toContain("balance exhausted");
+  });
+
+  it("grok_check never publishes the one-time device code from a failed probe", async () => {
+    const dir = await tempDir();
+    const grokBin = await makeExecutable(
+      join(dir, "grok"),
+      `#!/bin/sh
+if [ "$1" = "--version" ]; then echo "grok fake 1.0.3"; exit 0; fi
+if [ "$1" = "--help" ]; then
+  echo "--prompt-file --output-format streaming-json --permission-mode plan --no-subagents --disable-web-search"
+  exit 0
+fi
+echo "Visit https://accounts.x.ai/oauth2/device and enter user_code=ABCD-1234" >&2
+exit 1
+`
+    );
+
+    const parsed = envelope(
+      await withEnv({ GROK_BIN: grokBin }, () =>
+        grokCheck({ cwd: dir, includeModels: false, ...roots(dir), probeInvocation: true })
+      )
+    );
+
+    expect(parsed.warnings.join(" ")).toContain("accounts.x.ai");
+    expect(JSON.stringify(parsed)).not.toContain("ABCD-1234");
+  });
+
   it("grok_check refuses to spend quota on an invocation probe a CLI cannot run read-only", async () => {
     const dir = await tempDir();
     const argsFile = join(dir, "unreachable-probe-argv.log");

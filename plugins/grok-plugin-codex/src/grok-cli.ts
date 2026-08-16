@@ -4,6 +4,7 @@ import { delimiter, join } from "node:path";
 import { homedir } from "node:os";
 import { spawn, type ChildProcess } from "node:child_process";
 import { normalizeStopReason } from "./result-parser.js";
+import { defaultDiagnosticRedactor, redactDeviceCode } from "./redact.js";
 import type { GrokModelsSummary, ProcessResult } from "./types.js";
 
 export type DiscoverGrokOptions = {
@@ -289,7 +290,17 @@ export type GrokInvocationProbe = {
   observedEventTypes: string[];
   exitCode: number | null;
   failureReason?: string;
+  /**
+   * X16: the classification of why the probe failed, from the CLI's own error events and stderr.
+   * Without it the probe reported only "exited 1", and a quota-exhausted account whose `grok models`
+   * still lists models came back as `entitled: "unknown"` — an undetermined fact standing in for one
+   * the probe had just determined.
+   */
+  failureCode?: string;
 };
+
+/** Enough of the vendor's own words to act on, never enough to be a log. */
+const PROBE_FAILURE_EXCERPT_CHARS = 300;
 
 export const INVOCATION_PROBE_PROMPT = "Reply with exactly: OK";
 export const INVOCATION_PROBE_TIMEOUT_MS = 30_000;
@@ -323,6 +334,7 @@ export async function probeGrokInvocation(
   });
 
   const observedEventTypes: string[] = [];
+  const errorTexts: string[] = [];
   let observedStopReason: string | undefined;
   let sawText = false;
   for (const line of result.stdout.split(/\r?\n/)) {
@@ -339,20 +351,35 @@ export async function probeGrokInvocation(
     if (!observedEventTypes.includes(type)) observedEventTypes.push(type);
     if (type === "text") sawText = true;
     if (type === "end" && typeof event.stopReason === "string") observedStopReason = event.stopReason;
+    // X16: the vendor's own account of the failure used to be discarded here, leaving only "exited 1".
+    if (type === "error" || event.error !== undefined) {
+      const raw = event.error ?? event.message ?? event.data;
+      if (raw !== undefined) errorTexts.push(typeof raw === "string" ? raw : JSON.stringify(raw));
+    }
   }
 
   const observedStopReasonNormalized = normalizeStopReason(observedStopReason);
   const sawNormalEnd = observedEventTypes.includes("end") && observedStopReasonNormalized === "endturn";
   const callable = result.exitCode === 0 && !result.timedOut && sawText && sawNormalEnd;
-  const failureReason = callable
+  // Only vendor error events and stderr, never the probe's own answer text — the classifier is a
+  // substring matcher and Grok's prose must never decide the code (GPC-04).
+  const diagnosticText = [errorTexts.join("\n"), result.stderr].filter((part) => part.trim()).join("\n").trim();
+  const failureCode = callable || !diagnosticText ? undefined : classifyGrokErrorText(diagnosticText);
+  // The excerpt is a diagnostic string leaving the process, so it goes through the same redactor as
+  // every other free-form diagnostic field, and never carries the one-time device code.
+  const excerpt = diagnosticText
+    ? defaultDiagnosticRedactor()(redactDeviceCode(diagnosticText)).replace(/\s+/g, " ").slice(-PROBE_FAILURE_EXCERPT_CHARS)
+    : "";
+  const cause = callable
     ? undefined
     : result.timedOut
       ? "The invocation probe exceeded its 30s budget."
       : result.exitCode !== 0
-        ? `The invocation probe exited ${result.exitCode}.`
+        ? `The invocation probe exited ${result.exitCode}${failureCode ? ` (${failureCode})` : ""}.`
         : !sawText
           ? "The invocation probe produced no text event."
           : `The invocation probe ended with stopReason "${observedStopReason ?? "(absent)"}" instead of a normal end turn.`;
+  const failureReason = cause && excerpt ? `${cause} Grok reported: ${excerpt}` : cause;
 
   return {
     modelInvocationTested: true,
@@ -361,7 +388,8 @@ export async function probeGrokInvocation(
     observedStopReasonNormalized: observedStopReason === undefined ? undefined : observedStopReasonNormalized,
     observedEventTypes,
     exitCode: result.exitCode,
-    failureReason
+    failureReason,
+    failureCode
   };
 }
 
