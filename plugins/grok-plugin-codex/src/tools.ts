@@ -1363,7 +1363,7 @@ export async function grokFinalize(args: {
   _workspaceRoots?: string[];
 }) {
   let sessionId = args.sessionId;
-  if (!sessionId && args.jobId) {
+  if (args.jobId) {
     try {
       const store = new JobStore();
       const record = await store.read(args.jobId);
@@ -1372,8 +1372,30 @@ export async function grokFinalize(args: {
       // to stderr, and that lands in the stream summary. Reading only the record made
       // "call grok_finalize with this jobId" — the recovery this release made canonical — throw
       // finalize_target_unknown while summary.json held the id all along.
-      sessionId = record.grokSessionId ?? (await store.readStreamProgress(args.jobId))?.grokSessionId;
-      if (!sessionId) {
+      const learned = record.grokSessionId ?? (await store.readStreamProgress(args.jobId))?.grokSessionId;
+      // X14: `jobId` used to be read only when `sessionId` was absent, so a call carrying both
+      // silently finalized the session the caller named and ignored the job they also named — two
+      // different targets, one of them discarded without a word. The contract describes them as
+      // alternatives, so a pair that does not resolve to the same session is refused.
+      if (sessionId && learned && sessionId !== learned) {
+        throw new GrokPluginError(
+          "invalid_finalize_target",
+          `jobId ${args.jobId} belongs to Grok session ${learned}, not to the sessionId given in the same ` +
+            "call. grok_finalize takes one target: pass the jobId, or the sessionId, not a conflicting pair.",
+          false,
+          { jobId: args.jobId, jobSessionId: learned, sessionId }
+        );
+      }
+      if (sessionId && !learned) {
+        throw new GrokPluginError(
+          "invalid_finalize_target",
+          `jobId ${args.jobId} never learned a Grok session id, so it cannot be confirmed to name the same ` +
+            "session as the sessionId given in the same call. Pass one target, not both.",
+          false,
+          { jobId: args.jobId, sessionId }
+        );
+      }
+      if (!learned) {
         throw new GrokPluginError(
           "finalize_target_unknown",
           "That job never learned a Grok session id, so there is nothing to finalize. Read the partial " +
@@ -1382,6 +1404,7 @@ export async function grokFinalize(args: {
           { jobId: args.jobId }
         );
       }
+      sessionId = learned;
     } catch (error) {
       return failure(error);
     }

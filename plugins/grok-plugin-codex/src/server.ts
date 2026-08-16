@@ -239,7 +239,8 @@ server.registerTool(
       "tools, emit the complete answer now, and mark anything unverified as UNVERIFIED. This is the " +
       "remedy for timeout, max_turns_reached, cancelled_output and permission_denied_headless — it " +
       "recovers an answer in seconds instead of rerunning the task. It inherits the read-only mode of the " +
-      "session it resumes.",
+      "session it resumes. jobId and sessionId name one target between them: passing both is refused " +
+      "with invalid_finalize_target unless they resolve to the same Grok session.",
     inputSchema: {
       cwd: cwdRequired,
       jobId: jobIdSchema.optional(),
