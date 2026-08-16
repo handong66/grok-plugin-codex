@@ -326,6 +326,17 @@ async function runOrStartJob(params: CommonArgs & {
       Date.parse(result.record.finishedAt ?? new Date().toISOString()) -
         Date.parse(result.record.startedAt ?? result.record.createdAt)
     );
+    const diagnosticDetails = {
+      outputState: result.outputSummary.state,
+      outputTruncated: result.outputSummary.outputTruncated,
+      stopReason: result.outputSummary.stopReason,
+      grokSessionId: result.outputSummary.grokSessionId,
+      requestId: result.outputSummary.requestId,
+      textPreview: result.outputSummary.textPreview,
+      streamError: result.outputSummary.streamError,
+      guidance: result.outputSummary.guidance,
+      stderrTail: result.stderr.slice(-4_000)
+    };
     if (result.record.status === "cancelled") {
       throw new GrokPluginError("cancelled", "The Grok request was cancelled before completion.", false);
     }
@@ -337,14 +348,23 @@ async function runOrStartJob(params: CommonArgs & {
       };
       throw new GrokPluginError(error.code, error.message, error.retryable, {
         exitCode: result.record.exitCode,
-        outputState: result.outputSummary.state
+        ...diagnosticDetails
       });
     }
     if (!result.outputSummary.resultComplete) {
-      throw new GrokPluginError("incomplete_output", "Grok exited without a complete final text and end event.", true, {
-        outputState: result.outputSummary.state,
-        outputTruncated: result.outputSummary.outputTruncated
-      });
+      if (result.outputSummary.streamError) {
+        const streamError = result.outputSummary.streamError;
+        throw new GrokPluginError(streamError.code, streamError.message, streamError.retryable, diagnosticDetails);
+      }
+      const cancelled = result.outputSummary.state === "cancelled_partial";
+      throw new GrokPluginError(
+        cancelled ? "cancelled_output" : "incomplete_output",
+        cancelled
+          ? "Grok ended with stopReason=Cancelled before producing a final result."
+          : "Grok exited without non-empty final text and a normal EndTurn event.",
+        true,
+        diagnosticDetails
+      );
     }
     return success(
       {
@@ -371,7 +391,7 @@ export async function grokCheck(args: { cwd?: string; timeoutMs?: number; includ
     }
     const probe = await probeGrokCapabilities(discovered.bin, { timeoutMs: args.timeoutMs ?? 5_000 });
     const base = {
-      pluginVersion: "0.2.0",
+      pluginVersion: "0.2.1",
       contractVersion: "2",
       cliDiscovered: true,
       version: discovered.version,

@@ -27,7 +27,14 @@ function eventMetadata(event: Record<string, unknown>, key: string): string | un
 }
 
 function streamErrorFrom(event: Record<string, unknown>): PluginErrorInfo | undefined {
-  if (event.type !== "error" && event.error === undefined) return undefined;
+  if (event.type !== "error" && event.type !== "max_turns_reached" && event.error === undefined) return undefined;
+  if (event.type === "max_turns_reached") {
+    return {
+      code: "max_turns_reached",
+      message: grokFailureMessage("max_turns_reached"),
+      retryable: true
+    };
+  }
   const raw = event.error ?? event.data ?? event.message ?? "Grok emitted a streaming error event.";
   const message = typeof raw === "string" ? raw : JSON.stringify(raw);
   const code = classifyGrokErrorText(message);
@@ -90,7 +97,12 @@ export function summarizeGrokOutput(
   let state: JobOutputSummary["state"];
   if (record.status === "failed" || streamError) state = "failed_partial";
   else if (record.status === "succeeded") {
-    state = sawEnd && finalText.trim() && !outputTruncated ? "succeeded_with_text" : "succeeded_without_text";
+    if (stopReason === "Cancelled") state = "cancelled_partial";
+    else {
+      state = sawEnd && stopReason === "EndTurn" && finalText.trim() && !outputTruncated
+        ? "succeeded_with_text"
+        : "succeeded_without_text";
+    }
   } else if (record.status === "cancelled") state = "cancelled_partial";
   else if (record.status === "queued") state = "queued_partial";
   else state = "running_partial";
@@ -103,14 +115,16 @@ export function summarizeGrokOutput(
     guidance = "Grok output exceeded the capture limit. Returned text is incomplete and must not be treated as a final result.";
   } else if (record.status === "running" || record.status === "queued") {
     guidance = "Grok is still running. Poll result later or cancel and rerun with a narrower target.";
-  } else if (record.status === "cancelled") {
-    guidance = "Grok was cancelled. Any returned text is partial and not a final result.";
+  } else if (streamError?.code === "max_turns_reached") {
+    guidance = "Grok reached maxTurns before producing a final result. Narrow the target or increase maxTurns before retrying.";
   } else if (record.status === "failed" || streamError) {
     guidance = stderr.trim()
       ? "Grok failed. Inspect the bounded stderr tail and correct the environment or prompt."
       : "Grok failed without stderr. Rerun with a narrower prompt and inspect the structured error.";
+  } else if (state === "cancelled_partial") {
+    guidance = "Grok was cancelled. Any returned text is partial and not a final result; continue the session or rerun with a narrower target.";
   } else {
-    guidance = "Grok exited successfully but did not emit both non-empty text and an end event.";
+    guidance = "Grok exited successfully but did not emit non-empty text with a normal EndTurn event.";
   }
 
   return {

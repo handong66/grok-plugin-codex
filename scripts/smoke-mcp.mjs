@@ -154,7 +154,7 @@ transport.stderr?.on("data", (chunk) => {
   stderr += chunk.toString();
 });
 
-const client = new Client({ name: "grok-plugin-codex-smoke", version: "0.2.0" });
+const client = new Client({ name: "grok-plugin-codex-smoke", version: "0.2.1" });
 
 try {
   await client.connect(transport);

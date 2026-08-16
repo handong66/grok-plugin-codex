@@ -1,6 +1,6 @@
 # Grok for Codex
 
-`grok-plugin-codex` is the macOS/Linux Codex capability adapter for a locally installed Grok CLI. Version 0.2 provides explicit workspace scoping, typed MCP results, enforced read-only review tools, session operations, and restart-safe background jobs.
+`grok-plugin-codex` is the macOS/Linux Codex capability adapter for a locally installed Grok CLI. Version 0.2.1 adds strict normal-completion checks and typed cancellation, turn-limit, and authentication handling on top of the 0.2 runtime contract.
 
 ## Runtime contract
 
@@ -42,6 +42,8 @@ data.outputTruncated === false
 ```
 
 Use `data.finalText` for the captured answer. `stdoutTail`, `stderrTail`, partial states, and previews are diagnostics only.
+
+Completeness requires non-empty final text and `stopReason: "EndTurn"`. `Cancelled` output is partial and surfaces as `cancelled_output`; `max_turns_reached` is a typed retryable failure. Use the returned session and bounded diagnostic metadata to continue or rerun narrowly.
 
 ## Privacy boundary
 

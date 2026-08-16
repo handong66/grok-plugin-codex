@@ -11,8 +11,8 @@ describe("published contract drift", () => {
     const manifest = JSON.parse(await text("plugins/grok-plugin-codex/.codex-plugin/plugin.json"));
     const server = await text("plugins/grok-plugin-codex/src/server.ts");
 
-    expect(packageJson.version).toBe("0.2.0");
-    expect(manifest.version).toMatch(/^0\.2\.0(?:\+codex\.[0-9A-Za-z.-]+)?$/);
+    expect(packageJson.version).toBe("0.2.1");
+    expect(manifest.version).toMatch(/^0\.2\.1(?:\+codex\.[0-9A-Za-z.-]+)?$/);
     expect(manifest.version.split("+")[0]).toBe(packageJson.version);
     expect(server).toContain(`version: "${packageJson.version}"`);
   });
@@ -35,6 +35,9 @@ describe("published contract drift", () => {
     expect(published).not.toContain("Foreground requests invoke the user's Grok CLI directly");
     expect(published).toContain("/dev/fd/3");
     expect(published).toContain("resultComplete");
+    expect(published).toContain("EndTurn");
+    expect(published).toContain("cancelled_output");
+    expect(published).toContain("max_turns_reached");
     expect(published).toContain("GROK_BIN");
   });
 

@@ -20,7 +20,7 @@ transport.stderr?.on("data", (chunk) => {
 });
 
 const client = new Client(
-  { name: "grok-plugin-codex-live-smoke", version: "0.2.0" },
+  { name: "grok-plugin-codex-live-smoke", version: "0.2.1" },
   { capabilities: { roots: {} } }
 );
 client.setRequestHandler(ListRootsRequestSchema, async () => ({

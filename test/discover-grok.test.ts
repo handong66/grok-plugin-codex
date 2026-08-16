@@ -70,6 +70,57 @@ describe("Grok CLI discovery", () => {
     ]);
   });
 
+  it("requires explicit positive authentication evidence", () => {
+    const unauthenticated = parseModelsOutput(
+      [
+        "You are not authenticated.",
+        "",
+        "Default model: grok-4.5",
+        "",
+        "Available models:",
+        "  * grok-4.5 (default)"
+      ].join("\n")
+    );
+    const unknown = parseModelsOutput("Default model: grok-4.5");
+
+    expect(unauthenticated.loggedIn).toBe(false);
+    expect(unknown.loggedIn).toBe(false);
+  });
+
+  it("classifies max-turn exhaustion separately from generic CLI failure", () => {
+    const code = classifyGrokFailure({
+      command: "grok",
+      args: [],
+      exitCode: 1,
+      signal: null,
+      stdout: '{"type":"max_turns_reached"}',
+      stderr: "Error: max turns reached",
+      durationMs: 1,
+      stdoutTruncated: false,
+      stderrTruncated: false,
+      timedOut: false
+    });
+
+    expect(code).toBe("max_turns_reached");
+  });
+
+  it("does not classify an unrelated login attempt as missing Grok authentication", () => {
+    const code = classifyGrokFailure({
+      command: "grok",
+      args: [],
+      exitCode: 1,
+      signal: null,
+      stdout: "",
+      stderr: "Failed to login to remote server: ECONNREFUSED",
+      durationMs: 1,
+      stdoutTruncated: false,
+      stderrTruncated: false,
+      timedOut: false
+    });
+
+    expect(code).toBe("network_error");
+  });
+
   it("kills the foreground process tree on timeout", async () => {
     const dir = await tempDir();
     const marker = join(dir, "grandchild-finished.txt");
