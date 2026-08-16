@@ -11,9 +11,64 @@ defaults per kind instead of `600000`; `grok_result` omits raw log tails unless 
 as `true` / `false` / `"unknown"` rather than `null`; new tool `grok_finalize`; new codes
 `quota_free_tier`, `no_evidence_review`, `permission_denied_headless`, `readonly_session_escalation`,
 `foreground_wait_timeout`, `model_tool_incompatible`, `target_required`, `finalize_target_unknown`;
-`workspace_unavailable` is now retryable.
+`workspace_unavailable` is now retryable; the recovery handle's `suggested.tool` is `grok_finalize`
+(the `grok_continue` spelling moved to `recovery.fallback`); `grok_models`' `parsed.loggedIn` is
+`true` / `false` / `"unknown"`; `grok_check` / `grok_models` / `grok_sessions` / `grok_export` report
+`retryable` from the failure classifier instead of always `true`.
 
 ### Fixed
+
+- **X1 — a plan-mode permission verdict on a run that was never in plan mode.**
+  `outputSummary.shellApprovalBlocked` only checked that a cancelled turn's last tool activity looked
+  like a shell command, never that the job actually ran under enforced `--permission-mode plan`. A
+  mutable `grok_run` that used `run_terminal_command` successfully and then ended with a vendor
+  `cancelled` stop reason was therefore reported as `permission_denied_headless` (non-retryable) with
+  the plan-mode remedy — the inverse of what GK5 exists for. The flag now requires a read-only job
+  (`record.readOnly`, or the kind for records written before 0.3.0), and the bare last-tool-name guess
+  is used only when the stream carried no parsable denial at all.
+- **X2 — the two evidence codes were unreachable on the default path.** `permission_denied_headless`
+  and `no_evidence_review` were raised only inside the foreground wait branch, while
+  `review` / `adversarial_review` / `rescue` now default to `background: true`. The worker stored a
+  refused-shell run as a bare `cancelled` job with no `error` at all, so a default `grok_review` gave
+  callers nothing to branch on. Both classifications are now written onto the job record, so
+  `grok_status` and `grok_result` expose `job.error.code` on the background path as well.
+- **X3 / X4 — a learned Grok session id never reached the job record.** `record.grokSessionId` was
+  written only when the plugin could assign it up front (`--session-id`); an id learned from the `end`
+  event or from the `session_id=` the CLI prints to stderr stayed in the stream summary. So
+  `grok_finalize(jobId)` — the recovery every partial-result message names — threw
+  `finalize_target_unknown`, and `findSessionOrigin` resolved such a read-only session to "unknown",
+  which let `alwaysApprove` through with only a warning. The worker now persists the learned id at
+  completion (SPEC §D M8), and both lookups fall back to the stream summary for older records.
+- **X5 — a tool error classified as a missing session.** `classifyGrokErrorText` matched the bare
+  substring `session` plus `not found` / `does not exist`, and the recorded tool-error line is
+  `ERROR tool_error: tool_output_error session_id=<uuid> tool_name="Read" …`. A failed `Read` whose
+  payload also said a path does not exist became a non-retryable `session_not_found` — and could drive
+  `grok_continue`'s `fallbackToLatest` onto an unrelated session. `tool_output_error` is now classified
+  first, and the session rule matches bounded phrases (`session … not found`, `does not exist`,
+  `failed to restore session`) instead of the bare word.
+- **X6 — the machine-readable recovery handle contradicted the published recovery contract.**
+  `recovery.suggested` named `grok_continue` with the prompt "…give the final answer now, under 400
+  words", while `grok_check.data.contract.recoveryTool`, `CONTINUE_WITHOUT_TOOLS_REMEDY` and every
+  typed timeout / max-turns / cancelled message name `grok_finalize` and promise a *complete* answer.
+  A caller that executed the handle therefore skipped `grok_finalize` and asked Grok to truncate.
+  `suggested` now names `grok_finalize`; the literal `grok_continue` shape survives as
+  `recovery.fallback` with `maxTurns: 1` and the `grok_finalize` prompt, and the word cap is gone.
+- **X7 — discovery failures still advertised retry.** `grok_check`, `grok_models`, `grok_sessions` and
+  `grok_export` passed a hard-coded `retryable: true` for whatever the classifier returned, so a
+  caller obeying the flag looped `grok models` against a logged-out or quota-exhausted CLI — the exact
+  advice GPC-04 removed from the execution path. All four now report `isRetryableGrokFailure(code)`.
+- **X8 — a silent model listing published as "not authenticated".** `parseModelsOutput` returned a
+  two-state `loggedIn = hasPositive && !hasNegative`, and `grok_check` wrote it straight into
+  `authenticated`; a successful listing that never mentions login was therefore published as `false`,
+  which a gate decision reads as a negative. The fact is now three-state (SPEC §B GK1 item 3):
+  positive evidence → `true`, an explicit negative → `false`, silence → `"unknown"`. Only positive
+  evidence still counts as signed in.
+- **X9 — a failed continuation shadowed the real latest session.** `findLatestSessionOrigin` did not
+  filter by outcome, so a `grok_continue` that died with `session_not_found` still carried the id it
+  had asked for and the newest timestamp. Because a `continue` job can never be an origin, the lookup
+  then returned nothing and `continueLatest` + `alwaysApprove` fell into the "this plugin started no
+  session here" branch — a warning only — while the genuinely latest read-only session was resumed
+  unguarded. Such records are now skipped, and the newest id that actually resolves to an origin wins.
 
 - **GPC-06 — read-only prompts never said shell execution was unavailable.** All three enforced
   read-only prompts run under `--permission-mode plan --no-subagents`, which auto-refuses shell

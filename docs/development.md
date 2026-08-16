@@ -109,6 +109,24 @@ Only then is `resultComplete` true. Codex still verifies the result against real
 
 An end event whose normalised stop reason is a cancellation remains `cancelled_partial` and foreground tools return `cancelled_output`; a vendor `cancelled` stop reason is stored as a `cancelled` job, never as `succeeded`. A `max_turns_reached` stream event is a typed retryable failure. The remedy the runtime prints (`CONTINUE_WITHOUT_TOOLS_REMEDY`) is to continue the same session with `maxTurns: 1` and a prompt to stop using tools and emit the final answer — not to narrow the target or raise `maxTurns` — and it is reachable as the `recovery.suggested` call on every non-complete envelope. Both paths retain the Grok session ID, request ID, stop reason, bounded stderr, and partial text for diagnosis or continuation. Guidance text lives in `grok-cli.ts` / `result-parser.ts`; the READMEs and `skills/grok/SKILL.md` must not tell a caller something the error message contradicts.
 
+The machine-readable handle must not disagree with them either. `recovery.suggested` names the same
+primitive the prose names — `grok_finalize`, the value `grok_check` publishes as
+`contract.recoveryTool` — and `recovery.fallback` spells the identical call out for a caller that only
+speaks `grok_continue`. Neither may ask for a shortened answer while the typed messages promise a
+complete one; the "under N words" prompt that shipped in the first 0.3.0 draft is the defect this rule
+exists to prevent (X6).
+
+`outputSummary.shellApprovalBlocked` and the `permission_denied_headless` code it drives require an
+**enforced read-only** job (`record.readOnly`, or the kind for records written before 0.3.0). A
+mutable run that used the shell and then ended `cancelled` is a plain `cancelled_output` (X1). Both
+that code and `no_evidence_review` are written onto the job record by the worker, not only raised on
+the foreground wait path, because the read-only kinds default to `background: true` (X2).
+
+Every classification that names a Grok session must survive a run that could not be given one up
+front: the worker writes the session id it learned from the `end` event or from the CLI's
+`session_id=` stderr line back onto the record at completion, and `findSessionOrigin` /
+`grok_finalize` fall back to the stream summary for older records (X3/X4, SPEC §D M8).
+
 An envelope has two human-readable fields, `error.message` and `outputSummary.guidance`, and they must not disagree. `timeout`, `terminated` and `max_turns_reached` are one class — a live session that never got to answer — so both fields come from `grokFailureMessage(code)`. A wall-clock timeout emits no stream event, so its guidance is derived from the stored `error.code`, not from the stream. No guidance may tell a caller to narrow the target, raise `maxTurns`, or rerun the task; that includes the fallback for an unclassified failure. The guidance for an in-flight job states when cancelling is warranted (`waitingForAuth`, or no event movement for 45 s) rather than suggesting a cancel, matching the tool descriptions (X7).
 
 ## Failure classification

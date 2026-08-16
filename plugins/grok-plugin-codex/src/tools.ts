@@ -186,14 +186,30 @@ function sleep(ms: number): Promise<void> {
   return new Promise((resolvePromise) => setTimeout(resolvePromise, ms));
 }
 
-/** The continuation prompt that recovered stalled runs in the recorded window. */
-const RECOVERY_PROMPT = "Stop using tools and give the final answer now, under 400 words.";
+/**
+ * GK4: "stop using tools and answer now" was the single most effective recovery in the recorded
+ * window — 21 of 26 `--max-turns 1|2` jobs succeeded and none hit the turn limit — yet 71 of 196
+ * observed `grok_continue` prompts had to reinvent it, each in its own words. This makes it one call.
+ */
+export const FINALIZE_PROMPT =
+  "Stop using tools now. Do not read, search, or run anything else. Emit the complete final answer " +
+  "immediately, using only what you already have. Mark every claim you could not verify as UNVERIFIED " +
+  "and list what you did not inspect.";
 
 export type RecoveryHandle = {
   jobId: string;
   grokSessionId?: string;
   partialTextChars: number;
+  /** The one-call recovery. `grok_finalize` supplies `maxTurns: 1` and the prompt itself. */
   suggested: {
+    tool: "grok_finalize";
+    args: {
+      cwd: string;
+      sessionId?: string;
+    };
+  };
+  /** The same recovery spelled out for a caller that only speaks `grok_continue` (GPC-05.2). */
+  fallback: {
     tool: "grok_continue";
     args: {
       cwd: string;
@@ -209,6 +225,14 @@ export type RecoveryHandle = {
  * GPC-05: a non-completion used to end with `data: null` and no job id, so the caller could not
  * reach the text it had already paid for. Every non-complete envelope now carries the handle that
  * makes a ~10-30s tool-free continuation possible instead of a full rerun.
+ *
+ * X6: the handle used to name `grok_continue` with a prompt capped at 400 words, while
+ * `grok_check.data.contract.recoveryTool`, `CONTINUE_WITHOUT_TOOLS_REMEDY` and every typed
+ * timeout/max-turns/cancelled message name `grok_finalize` and promise a *complete* answer. A caller
+ * that executed the machine-readable handle therefore did the opposite of what the prose told it and
+ * asked Grok to truncate. The primary suggestion is now the same primitive the prose names; the
+ * literal GPC-05.2 shape survives as `fallback`, with the word cap dropped — it contradicted the
+ * "complete answer" promise the same release published (ledger ruling, external fix-round-1).
  */
 export function buildRecovery(params: {
   jobId: string;
@@ -217,9 +241,14 @@ export function buildRecovery(params: {
   partialTextChars: number;
 }): { recovery: RecoveryHandle; warnings: string[] } {
   const warnings: string[] = [];
-  const args: RecoveryHandle["suggested"]["args"] = params.grokSessionId
-    ? { cwd: params.cwd, sessionId: params.grokSessionId, maxTurns: 1, prompt: RECOVERY_PROMPT }
-    : { cwd: params.cwd, continueLatest: true, maxTurns: 1, prompt: RECOVERY_PROMPT };
+  // `grok_finalize` with neither jobId nor sessionId continues the latest session in this cwd, which
+  // is exactly the degradation GPC-05.5 asks for when no session id was ever learned.
+  const suggestedArgs: RecoveryHandle["suggested"]["args"] = params.grokSessionId
+    ? { cwd: params.cwd, sessionId: params.grokSessionId }
+    : { cwd: params.cwd };
+  const fallbackArgs: RecoveryHandle["fallback"]["args"] = params.grokSessionId
+    ? { cwd: params.cwd, sessionId: params.grokSessionId, maxTurns: 1, prompt: FINALIZE_PROMPT }
+    : { cwd: params.cwd, continueLatest: true, maxTurns: 1, prompt: FINALIZE_PROMPT };
   if (!params.grokSessionId) {
     warnings.push(
       `No Grok session id is known for job ${params.jobId}; the suggested recovery continues the latest session ` +
@@ -231,7 +260,8 @@ export function buildRecovery(params: {
       jobId: params.jobId,
       grokSessionId: params.grokSessionId,
       partialTextChars: params.partialTextChars,
-      suggested: { tool: "grok_continue", args }
+      suggested: { tool: "grok_finalize", args: suggestedArgs },
+      fallback: { tool: "grok_continue", args: fallbackArgs }
     },
     warnings
   };
@@ -1304,16 +1334,6 @@ export async function grokAdversarialReview(
   ].join("\n");
   return await runOrStartJob({ ...args, kind: "adversarial_review", prompt, readOnly: true });
 }
-
-/**
- * GK4: "stop using tools and answer now" was the single most effective recovery in the recorded
- * window — 21 of 26 `--max-turns 1|2` jobs succeeded and none hit the turn limit — yet 71 of 196
- * observed `grok_continue` prompts had to reinvent it, each in its own words. This makes it one call.
- */
-export const FINALIZE_PROMPT =
-  "Stop using tools now. Do not read, search, or run anything else. Emit the complete final answer " +
-  "immediately, using only what you already have. Mark every claim you could not verify as UNVERIFIED " +
-  "and list what you did not inspect.";
 
 export async function grokFinalize(args: {
   cwd: string;

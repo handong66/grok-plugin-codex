@@ -1,7 +1,7 @@
 import { readFile, readdir } from "node:fs/promises";
 import { join } from "node:path";
 import { describe, expect, it } from "vitest";
-import { grokResult, grokRun } from "../plugins/grok-plugin-codex/src/tools.js";
+import { FINALIZE_PROMPT, buildRecovery, grokResult, grokRun } from "../plugins/grok-plugin-codex/src/tools.js";
 import { makeExecutable, tempDir } from "./helpers.js";
 
 type ToolResult = {
@@ -83,10 +83,17 @@ printf '%s\\n' '{"type":"text","data":"partial"}'`
     expect(record.grokSessionId).toBe(assigned);
     expect(parsed.ok).toBe(false);
     expect(parsed.error.details.recovery.grokSessionId).toBe(assigned);
-    expect(parsed.error.details.recovery.suggested.tool).toBe("grok_continue");
+    // X6: the machine-readable handle names the same primitive the prose names (grok_check's
+    // contract.recoveryTool, CONTINUE_WITHOUT_TOOLS_REMEDY, every typed partial-result message).
+    expect(parsed.error.details.recovery.suggested.tool).toBe("grok_finalize");
     expect(parsed.error.details.recovery.suggested.args.sessionId).toBe(assigned);
-    expect(parsed.error.details.recovery.suggested.args.maxTurns).toBe(1);
-    expect(parsed.error.details.recovery.suggested.args.prompt).toContain("Stop using tools");
+    // The literal GPC-05.2 shape survives for callers that only speak grok_continue.
+    expect(parsed.error.details.recovery.fallback.tool).toBe("grok_continue");
+    expect(parsed.error.details.recovery.fallback.args.sessionId).toBe(assigned);
+    expect(parsed.error.details.recovery.fallback.args.maxTurns).toBe(1);
+    expect(parsed.error.details.recovery.fallback.args.prompt).toContain("Stop using tools");
+    // The word cap contradicted the "complete answer" promise the same release published.
+    expect(JSON.stringify(parsed.error.details.recovery)).not.toMatch(/under \d+ words/i);
     expect(parsed.error.details.recovery.jobId).toBe(record.id);
     expect(parsed.error.details.finalTextRef).toBe(record.id);
     expect(parsed.error.details.recovery.partialTextChars).toBe("partial".length);
@@ -113,8 +120,14 @@ printf '%s\\n' '{"type":"text","data":"partial"}'
 
     expect(record.args).not.toContain("--session-id");
     expect(record.grokSessionId).toBeUndefined();
-    expect(parsed.error.details.recovery.suggested.args.continueLatest).toBe(true);
+    // GPC-05.5: with no session id the handle degrades to "continue the latest session in this cwd".
+    // `grok_finalize` with neither jobId nor sessionId does exactly that, so the degraded suggestion
+    // carries only the cwd; the spelled-out fallback still names continueLatest explicitly.
+    expect(parsed.error.details.recovery.suggested.tool).toBe("grok_finalize");
     expect(parsed.error.details.recovery.suggested.args.sessionId).toBeUndefined();
+    expect(parsed.error.details.recovery.suggested.args.jobId).toBeUndefined();
+    expect(parsed.error.details.recovery.fallback.args.continueLatest).toBe(true);
+    expect(parsed.error.details.recovery.fallback.args.sessionId).toBeUndefined();
     expect(parsed.warnings.join(" ")).toContain("latest session");
   }, 30_000);
 
@@ -167,4 +180,23 @@ exit 1`
     expect(parsed.error.details.guidance.toLowerCase()).toContain("do not use any tools");
     expect(parsed.error.details.recovery.suggested.args.sessionId).toMatch(UUID);
   }, 30_000);
+
+  it("does not contradict the published recovery contract (X6)", () => {
+    const withSession = buildRecovery({
+      jobId: "job_recoverycontract00000",
+      cwd: "/repo",
+      grokSessionId: "00000000-0000-4000-8000-000000000001",
+      partialTextChars: 12
+    });
+
+    // grok_check publishes contract.recoveryTool = "grok_finalize" and every typed partial-result
+    // message promises a *complete* answer; the handle used to say grok_continue with a 400-word cap.
+    expect(withSession.recovery.suggested.tool).toBe("grok_finalize");
+    expect(withSession.recovery.fallback.tool).toBe("grok_continue");
+    expect(withSession.recovery.fallback.args.prompt).toBe(FINALIZE_PROMPT);
+    expect(withSession.recovery.fallback.args.prompt).not.toMatch(/\bwords\b/i);
+    expect(withSession.warnings).toEqual([]);
+    // The suggested args must be valid grok_finalize input: cwd plus at most one target.
+    expect(Object.keys(withSession.recovery.suggested.args).sort()).toEqual(["cwd", "sessionId"]);
+  });
 });
