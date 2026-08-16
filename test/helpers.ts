@@ -12,8 +12,20 @@ export async function makeExecutable(path: string, body: string): Promise<string
   return path;
 }
 
-export function fakeGrokScript(options: { version?: string; modelsOutput?: string } = {}): string {
+/**
+ * Grok has shipped two spellings of the same stop reasons. Tests parameterise over both so a
+ * future vocabulary change fails loudly instead of silently zeroing out completion detection.
+ */
+export const STOP_REASON_SPELLINGS = {
+  endTurn: ["end_turn", "EndTurn"] as const,
+  cancelled: ["cancelled", "Cancelled"] as const
+};
+
+export function fakeGrokScript(
+  options: { version?: string; modelsOutput?: string; stopReason?: string } = {}
+): string {
   const version = options.version ?? "grok fake 1.0.0";
+  const stopReason = options.stopReason ?? "end_turn";
   const modelsOutput =
     options.modelsOutput ??
     [
@@ -53,7 +65,7 @@ case " $* " in
     for arg in "$@"; do printf '%s\\n' "$arg"; done
     ;;
   *)
-    printf '%s\\n' '{"type":"text","data":"OK"}' '{"type":"end","sessionId":"s1","requestId":"r1","stopReason":"EndTurn"}'
+    printf '%s\\n' '{"type":"text","data":"OK"}' '{"type":"end","sessionId":"s1","requestId":"r1","stopReason":"${stopReason}"}'
     ;;
 esac
 `;

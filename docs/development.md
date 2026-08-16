@@ -59,13 +59,15 @@ Streaming lines may contain non-JSON diagnostics. The parser accepts JSON events
 
 1. process status `succeeded`;
 2. non-empty text;
-3. an `end` event with `stopReason: "EndTurn"`;
+3. an `end` event whose normalised stop reason is not a cancellation;
 4. no structured stream error;
 5. no output truncation.
 
+`normalizeStopReason` lowercases the raw value and strips every non-letter, so `EndTurn`, `end_turn`, and `END-TURN` are one fact; `cancelled` and `canceled` are accepted spellings of the other. An unrecognised stop reason on a stream that ended with non-empty text fails **open**: the result is complete, `stopReasonRecognised` is false, and `outputSummary.warnings` names the raw value. The exact-match rule that shipped in 0.2.1 is what made every real Grok 1.0.x completion look incomplete.
+
 Only then is `resultComplete` true. Codex still verifies the result against real workspace files.
 
-An end event with `stopReason: "Cancelled"` remains `cancelled_partial` and foreground tools return `cancelled_output`. A `max_turns_reached` stream event is a typed retryable failure; callers should narrow the target or increase `maxTurns`. Both paths retain the Grok session ID, request ID, stop reason, bounded stderr, and partial text for diagnosis or continuation.
+An end event whose normalised stop reason is a cancellation remains `cancelled_partial` and foreground tools return `cancelled_output`. A `max_turns_reached` stream event is a typed retryable failure; callers should narrow the target or increase `maxTurns`. Both paths retain the Grok session ID, request ID, stop reason, bounded stderr, and partial text for diagnosis or continuation.
 
 ## Local upgrade loop
 

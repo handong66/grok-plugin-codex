@@ -9,11 +9,12 @@ Operate the installed `grok_*` tools according to their current schemas. Codex o
 
 ## Required contract
 
-- Use `grok_check` when CLI discovery, compatibility, login, or model listing is uncertain. Treat `cliDiscovered`, `authenticated`, `modelsListed`, and `callable` as separate facts.
+- Use `grok_check` when CLI discovery, compatibility, login, or model listing is uncertain. Treat `cliDiscovered`, `authenticated`, `modelsListed`, and `callable` as separate facts. `modelInvocationTested`/`callable` stay `false`/`null` unless you pass `probeInvocation: true`, which spends real quota on one bounded call; do not enable it routinely.
 - Configure a custom executable through trusted MCP environment variable `GROK_BIN`; never accept a binary path from a task prompt or tool argument.
 - Pass an explicit `cwd` for workspace, session, and export operations. Review and adversarial-review calls also require an explicit non-empty `target` and are forced into read-only plan mode without subagents.
 - A background start returns `data.job.id`. Call status, result, or cancel with that `jobId` only; job state is private and independent of workspace `cwd`.
-- Accept an answer only when `data.resultComplete === true`, `data.outputTruncated === false`, and the summary reports `stopReason: "EndTurn"`. Treat `cancelled_output` and `max_turns_reached` as partial; continue the returned session or rerun with a narrower target. Use `data.finalText`, not previews or raw log tails.
+- Accept an answer only when `data.resultComplete === true` and `data.outputTruncated === false`. The plugin normalises `stopReason` case- and separator-insensitively (`end_turn`, `EndTurn`, `cancelled`, `Cancelled` are all understood); never string-match the raw value yourself. Treat `cancelled_output` and `max_turns_reached` as partial; continue the returned session or rerun with a narrower target. Use `data.finalText`, not previews or raw log tails.
+- When `outputSummary.stopReasonRecognised === false` the plugin accepted an unfamiliar stop reason and said so in `warnings`. The answer is still returned; reject it only if your task needs strict vocabulary matching.
 - Continue only a known `sessionId` or explicitly request the latest session. Export returns Markdown; the plugin does not write a caller-selected output file.
 
 ## Safety and recovery

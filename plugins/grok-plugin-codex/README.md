@@ -43,7 +43,9 @@ data.outputTruncated === false
 
 Use `data.finalText` for the captured answer. `stdoutTail`, `stderrTail`, partial states, and previews are diagnostics only.
 
-Completeness requires non-empty final text and `stopReason: "EndTurn"`. `Cancelled` output is partial and surfaces as `cancelled_output`; `max_turns_reached` is a typed retryable failure. Use the returned session and bounded diagnostic metadata to continue or rerun narrowly.
+Completeness requires non-empty final text and a normal end event. The plugin normalises `stopReason` case- and separator-insensitively, so `end_turn` and `EndTurn` (and `cancelled`/`Cancelled`/`canceled`) are all recognised; callers must not string-match the raw value. The raw value stays in `outputSummary.stopReason`, the compared form in `stopReasonNormalized`. Cancelled output is partial and surfaces as `cancelled_output`; `max_turns_reached` is a typed retryable failure. Use the returned session and bounded diagnostic metadata to continue or rerun narrowly.
+
+An unfamiliar stop reason no longer destroys the answer: a stream that ended with non-empty text is reported complete, with `stopReasonRecognised: false` and a warning naming the raw value.
 
 ## Privacy boundary
 

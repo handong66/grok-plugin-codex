@@ -125,11 +125,18 @@ export type JobOutputSummary = {
   eventCounts: Record<string, number>;
   grokSessionId?: string;
   requestId?: string;
+  /** Raw stopReason exactly as the Grok CLI emitted it. */
   stopReason?: string;
+  /** Case- and separator-insensitive form used for every completion decision. */
+  stopReasonNormalized?: string;
+  /** False when the plugin did not recognise the stop reason and had to fail open. */
+  stopReasonRecognised: boolean;
   sawEnd: boolean;
   thoughtEventCount: number;
   textEventCount: number;
   textPreview?: string;
   streamError?: PluginErrorInfo;
   guidance: string;
+  /** Non-fatal parser observations that callers should surface, never swallow. */
+  warnings: string[];
 };

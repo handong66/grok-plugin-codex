@@ -99,7 +99,7 @@ data.resultComplete === true
 data.outputTruncated === false
 ```
 
-Internally, completeness also requires non-empty final text and `stopReason: "EndTurn"`. A `Cancelled` end is returned as `cancelled_output`; `max_turns_reached` asks the caller to narrow the target or increase `maxTurns`. Both preserve bounded recovery metadata without promoting partial text to a conclusion.
+Internally, completeness also requires non-empty final text and a normal end event. Stop reasons are normalised case- and separator-insensitively (`end_turn` and `EndTurn` are the same fact), the raw value is preserved in `outputSummary.stopReason`, and callers must not string-match it themselves. A cancelled end is returned as `cancelled_output`; `max_turns_reached` asks the caller to narrow the target or increase `maxTurns`. An unrecognised stop reason after real text is accepted with `stopReasonRecognised: false` plus a warning instead of being discarded. All paths preserve bounded recovery metadata without promoting partial text to a conclusion.
 
 Use `data.finalText`. Raw tails and partial states are diagnostics only. Terminal job artifacts are retained for seven days and cleaned opportunistically.
 

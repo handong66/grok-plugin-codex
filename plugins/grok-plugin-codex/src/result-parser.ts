@@ -1,6 +1,14 @@
 import type { JobOutputSummary, JobRecord, PluginErrorInfo } from "./types.js";
 import { classifyGrokErrorText, grokFailureMessage, isRetryableGrokFailure } from "./grok-cli.js";
 
+/** Grok has shipped both `EndTurn` and `end_turn`; compare on a case/separator-free form. */
+export function normalizeStopReason(value: string | undefined): string {
+  return (value ?? "").toLowerCase().replace(/[^a-z]/g, "");
+}
+
+const NORMAL_COMPLETION_STOP_REASONS = new Set(["endturn"]);
+const CANCELLED_STOP_REASONS = new Set(["cancelled", "canceled"]);
+
 function previewText(text: string): string {
   const singleLine = text.replace(/\s+/g, " ").trim();
   return singleLine.length > 500 ? `${singleLine.slice(0, 497)}...` : singleLine;
@@ -94,14 +102,24 @@ export function summarizeGrokOutput(
   }
 
   const finalText = textChunks.join("");
+  const warnings: string[] = [];
+  const stopReasonNormalized = normalizeStopReason(stopReason);
+  const stopReasonRecognised =
+    NORMAL_COMPLETION_STOP_REASONS.has(stopReasonNormalized) || CANCELLED_STOP_REASONS.has(stopReasonNormalized);
+
   let state: JobOutputSummary["state"];
   if (record.status === "failed" || streamError) state = "failed_partial";
   else if (record.status === "succeeded") {
-    if (stopReason === "Cancelled") state = "cancelled_partial";
+    if (CANCELLED_STOP_REASONS.has(stopReasonNormalized)) state = "cancelled_partial";
     else {
-      state = sawEnd && stopReason === "EndTurn" && finalText.trim() && !outputTruncated
-        ? "succeeded_with_text"
-        : "succeeded_without_text";
+      // Fail open on an unfamiliar vocabulary: a stream that ended with real text is a
+      // completion, and 0.2.1's exact-match rule silently destroyed those answers. The
+      // raw value plus stopReasonRecognised lets a strict caller still reject it.
+      const endedWithText = Boolean(sawEnd && finalText.trim() && !outputTruncated);
+      state = endedWithText ? "succeeded_with_text" : "succeeded_without_text";
+      if (endedWithText && !stopReasonRecognised) {
+        warnings.push(`unrecognised stopReason "${stopReason ?? ""}"; treated as normal completion`);
+      }
     }
   } else if (record.status === "cancelled") state = "cancelled_partial";
   else if (record.status === "queued") state = "queued_partial";
@@ -124,7 +142,7 @@ export function summarizeGrokOutput(
   } else if (state === "cancelled_partial") {
     guidance = "Grok was cancelled. Any returned text is partial and not a final result; continue the session or rerun with a narrower target.";
   } else {
-    guidance = "Grok exited successfully but did not emit non-empty text with a normal EndTurn event.";
+    guidance = "Grok exited successfully but did not emit non-empty text with a normal end event.";
   }
 
   return {
@@ -136,11 +154,14 @@ export function summarizeGrokOutput(
     grokSessionId,
     requestId,
     stopReason,
+    stopReasonNormalized: stopReason === undefined ? undefined : stopReasonNormalized,
+    stopReasonRecognised,
     sawEnd,
     thoughtEventCount,
     textEventCount,
     textPreview: finalText ? previewText(finalText) : undefined,
     streamError,
-    guidance
+    guidance,
+    warnings
   };
 }

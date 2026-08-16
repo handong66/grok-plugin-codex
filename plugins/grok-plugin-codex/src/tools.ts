@@ -1,15 +1,19 @@
-import { realpath, stat } from "node:fs/promises";
-import { homedir } from "node:os";
+import { mkdtemp, realpath, rm, stat, writeFile } from "node:fs/promises";
+import { homedir, tmpdir } from "node:os";
 import { basename, dirname, isAbsolute, join, relative, resolve, sep } from "node:path";
 import {
   classifyGrokFailure,
   discoverGrok,
   parseModelsOutput,
   probeGrokCapabilities,
+  probeGrokInvocation,
   runGrok,
   grokFailureMessage,
   isRetryableGrokFailure,
-  type GrokCapabilities
+  INVOCATION_PROBE_PROMPT,
+  INVOCATION_PROBE_TIMEOUT_MS,
+  type GrokCapabilities,
+  type GrokInvocationProbe
 } from "./grok-cli.js";
 import { JobStore, toPublicJob } from "./job-store.js";
 import {
@@ -326,10 +330,13 @@ async function runOrStartJob(params: CommonArgs & {
       Date.parse(result.record.finishedAt ?? new Date().toISOString()) -
         Date.parse(result.record.startedAt ?? result.record.createdAt)
     );
+    const summaryWarnings = [...built.warnings, ...result.outputSummary.warnings];
     const diagnosticDetails = {
       outputState: result.outputSummary.state,
       outputTruncated: result.outputSummary.outputTruncated,
       stopReason: result.outputSummary.stopReason,
+      stopReasonNormalized: result.outputSummary.stopReasonNormalized,
+      stopReasonRecognised: result.outputSummary.stopReasonRecognised,
       grokSessionId: result.outputSummary.grokSessionId,
       requestId: result.outputSummary.requestId,
       textPreview: result.outputSummary.textPreview,
@@ -360,8 +367,8 @@ async function runOrStartJob(params: CommonArgs & {
       throw new GrokPluginError(
         cancelled ? "cancelled_output" : "incomplete_output",
         cancelled
-          ? "Grok ended with stopReason=Cancelled before producing a final result."
-          : "Grok exited without non-empty final text and a normal EndTurn event.",
+          ? `Grok ended with a cancelled stop reason (${result.outputSummary.stopReason}) before producing a final result.`
+          : "Grok exited without non-empty final text and a normal end event.",
         true,
         diagnosticDetails
       );
@@ -375,12 +382,35 @@ async function runOrStartJob(params: CommonArgs & {
         outputSummary: result.outputSummary,
         stderrTail: result.stderr.slice(-4_000)
       },
-      built.warnings
+      summaryWarnings
     );
   });
 }
 
-export async function grokCheck(args: { cwd?: string; timeoutMs?: number; includeModels?: boolean; _workspaceRoots?: string[] }) {
+async function runInvocationProbe(
+  bin: string,
+  cwd: string,
+  model?: string,
+  timeoutMs?: number
+): Promise<GrokInvocationProbe> {
+  const dir = await mkdtemp(join(tmpdir(), "grok-plugin-codex-probe-"));
+  const promptFile = join(dir, "probe.txt");
+  try {
+    await writeFile(promptFile, INVOCATION_PROBE_PROMPT, { mode: 0o600 });
+    return await probeGrokInvocation(bin, { cwd, model, timeoutMs, promptFile });
+  } finally {
+    await rm(dir, { recursive: true, force: true }).catch(() => undefined);
+  }
+}
+
+export async function grokCheck(args: {
+  cwd?: string;
+  timeoutMs?: number;
+  includeModels?: boolean;
+  probeInvocation?: boolean;
+  model?: string;
+  _workspaceRoots?: string[];
+}) {
   return await guarded(async () => {
     const discovered = await discoverGrok();
     if (!discovered.ok || !discovered.bin) {
@@ -404,9 +434,27 @@ export async function grokCheck(args: { cwd?: string; timeoutMs?: number; includ
     if (probe.exitCode !== 0) {
       throw new GrokPluginError("cli_incompatible", "Grok --help failed, so capability compatibility could not be established.", false, base);
     }
-    if (args.includeModels === false) return success(base);
+    if (args.includeModels === false && !args.probeInvocation) return success(base);
 
     const cwd = await resolveDiscoveryCwd(args.cwd, args._workspaceRoots);
+    const warnings: string[] = [];
+    let invocation: GrokInvocationProbe | undefined;
+    if (args.probeInvocation) {
+      invocation = await runInvocationProbe(discovered.bin, cwd, args.model, args.timeoutMs);
+      if (!invocation.callable && invocation.failureReason) warnings.push(invocation.failureReason);
+    }
+    const probed = invocation
+      ? {
+          ...base,
+          modelInvocationTested: invocation.modelInvocationTested,
+          callable: invocation.callable,
+          observedStopReason: invocation.observedStopReason,
+          observedStopReasonNormalized: invocation.observedStopReasonNormalized,
+          observedEventTypes: invocation.observedEventTypes
+        }
+      : base;
+    if (args.includeModels === false) return success(probed, warnings);
+
     const models = await runGrok(withGlobalCwd(cwd, ["models"]), {
       cwd,
       timeoutMs: args.timeoutMs ?? DEFAULT_DISCOVERY_TIMEOUT_MS
@@ -414,18 +462,21 @@ export async function grokCheck(args: { cwd?: string; timeoutMs?: number; includ
     const parsed = parseModelsOutput(models.stdout || models.stderr);
     if (models.exitCode !== 0) {
       throw new GrokPluginError(classifyGrokFailure(models), "Grok model discovery failed.", true, {
-        ...base,
+        ...probed,
         authenticated: parsed.loggedIn,
         modelsListed: false,
         exitCode: models.exitCode
       });
     }
-    return success({
-      ...base,
-      authenticated: parsed.loggedIn,
-      modelsListed: true,
-      models: parsed
-    });
+    return success(
+      {
+        ...probed,
+        authenticated: parsed.loggedIn,
+        modelsListed: true,
+        models: parsed
+      },
+      warnings
+    );
   });
 }
 
@@ -527,15 +578,18 @@ export async function grokStatus(args: { jobId: string }) {
 export async function grokResult(args: { jobId: string; maxChars?: number }) {
   return await guarded(async () => {
     const result = await new JobStore().result(args.jobId, args.maxChars);
-    return success({
-      job: toPublicJob(result.record),
-      stdoutTail: result.stdout,
-      stderrTail: result.stderr,
-      outputSummary: result.outputSummary,
-      finalText: result.outputSummary.finalText,
-      resultComplete: result.outputSummary.resultComplete,
-      outputTruncated: result.outputSummary.outputTruncated
-    });
+    return success(
+      {
+        job: toPublicJob(result.record),
+        stdoutTail: result.stdout,
+        stderrTail: result.stderr,
+        outputSummary: result.outputSummary,
+        finalText: result.outputSummary.finalText,
+        resultComplete: result.outputSummary.resultComplete,
+        outputTruncated: result.outputSummary.outputTruncated
+      },
+      result.outputSummary.warnings
+    );
   });
 }
 

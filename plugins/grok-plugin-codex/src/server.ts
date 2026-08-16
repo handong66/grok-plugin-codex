@@ -95,8 +95,22 @@ server.registerTool(
   "grok_check",
   {
     title: "Check Grok",
-    description: "Separate Grok CLI discovery, capability compatibility, authentication/model listing, and actual model-call evidence.",
-    inputSchema: { cwd: cwdOptional, includeModels: z.boolean().optional(), timeoutMs: timeoutSchema },
+    description:
+      "Separate Grok CLI discovery, capability compatibility, authentication/model listing, and actual model-call evidence. " +
+      "modelInvocationTested and callable stay false/null unless probeInvocation is explicitly requested.",
+    inputSchema: {
+      cwd: cwdOptional,
+      includeModels: z.boolean().optional(),
+      timeoutMs: timeoutSchema,
+      model: z.string().trim().min(1).max(512).optional().describe("Model for the opt-in invocation probe only."),
+      probeInvocation: z
+        .boolean()
+        .optional()
+        .describe(
+          "Opt-in only, default false. Spends real Grok quota on one bounded call (--max-turns 1, 30s cap) to prove " +
+            "the model answers and the stream still ends with a normal end turn. Never enable it for routine checks."
+        )
+    },
     outputSchema
   },
   (args, extra) => grokCheck(withCodexWorkspaceRoots(args, extra._meta))

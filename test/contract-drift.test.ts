@@ -33,9 +33,11 @@ describe("published contract drift", () => {
     expect(published).not.toContain("<cwd>/.grok-plugin-codex/jobs");
     expect(published).not.toMatch(/grok_(?:status|result|cancel)\([^)]*cwd/);
     expect(published).not.toContain("Foreground requests invoke the user's Grok CLI directly");
+    // 0.2.1 told callers to match stopReason === "EndTurn"; Grok 1.0.x emits end_turn.
+    expect(published).not.toMatch(/stopReason: "EndTurn"/);
+    expect(published).toContain("normalis");
     expect(published).toContain("/dev/fd/3");
     expect(published).toContain("resultComplete");
-    expect(published).toContain("EndTurn");
     expect(published).toContain("cancelled_output");
     expect(published).toContain("max_turns_reached");
     expect(published).toContain("GROK_BIN");

@@ -24,7 +24,7 @@ const requiredTools = [
 
 const expectedSchemas = {
   grok_check: {
-    properties: ["cwd", "includeModels", "timeoutMs"],
+    properties: ["cwd", "includeModels", "model", "probeInvocation", "timeoutMs"],
     required: []
   },
   grok_models: {

@@ -1,0 +1,13 @@
+{"type":"available_commands","tools":[],"commands":[]}
+{"type":"thought","data":"[redacted thought chunk 3]"}
+{"type":"thought","data":"[redacted thought chunk 4]"}
+{"type":"text","data":"[redacted text chunk 25]"}
+{"type":"text","data":"[redacted text chunk 26]"}
+{"type":"text","data":"[redacted text chunk 27]"}
+{"type":"text","data":"[redacted text chunk 28]"}
+{"type":"usage","usage":{"input_tokens":20749,"output_tokens":225,"cache_read_input_tokens":5248,"cache_creation_input_tokens":0,"reasoning_tokens":91},"signature":"[redacted]"}
+{"type":"tool_call","toolCallId":"tool-49","toolName":"[redacted]","title":"[redacted]","kind":"read","status":"pending","rawInput":{},"locations":[],"content":[]}
+{"type":"tool_call_update","toolCallId":"tool-50","status":null,"rawOutput":{"redacted":true},"locations":[],"content":[]}
+{"type":"tool_call","toolCallId":"tool-51","toolName":"[redacted]","title":"[redacted]","kind":"read","status":"pending","rawInput":{},"locations":[],"content":[]}
+{"type":"tool_call_update","toolCallId":"tool-52","status":null,"rawOutput":{"redacted":true},"locations":[],"content":[]}
+{"type":"end","stopReason":"cancelled","sessionId":"00000000-0000-4000-8000-000000000001","requestId":"00000000-0000-4000-8000-000000000002","usage":{"input_tokens":32110,"cache_read_input_tokens":31232,"cache_creation_input_tokens":0,"output_tokens":896,"reasoning_tokens":427,"total_tokens":64238},"num_turns":2,"total_cost_usd":0.01448604}

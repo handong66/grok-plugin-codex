@@ -26,7 +26,7 @@ python3 /path/to/skill-creator/scripts/quick_validate.py plugins/grok-plugin-cod
 python3 /path/to/skill-creator/scripts/quick_validate.py /path/to/Dong-skills/skills/grok-codex-collaboration
 ```
 
-## Optional live gate
+## Required live gate (release only)
 
 ```bash
 npm run smoke:live-grok
@@ -34,11 +34,17 @@ npm run smoke:live-grok
 
 The live smoke uses an explicit workspace, disables web search and subagents, requests one exact sentinel, and verifies `data.finalText`. Set `GROK_SMOKE_MODEL` only when an explicit model must be tested; otherwise Grok's configured default is used.
 
+This is **required before publishing a release**, not optional. It is the only gate that observes the real Grok stream vocabulary: the 0.2.1 stop-reason regression (`EndTurn` vs `end_turn`) passed every offline gate for a month because no mandatory check ever saw a live `end` event. It stays out of `npm run check` and out of `npm test` on purpose — unit tests must never call the real API, and the account behind this plugin has repeatedly exhausted its free tier.
+
+`grok_check { probeInvocation: true }` is the same evidence on demand: one bounded call (`--max-turns 1`, 30s cap) that asserts a `text` event and an `end` event normalising to `endturn`, reported as `modelInvocationTested` / `callable` / `observedStopReason`. It is opt-in for the same quota reason and must never be wired into a routine health check.
+
 ## Release and installed-path gate
 
 Before publishing:
 
 ```bash
+npm run check
+npm run smoke:live-grok
 npm audit --omit=dev
 npm pack --dry-run
 ```

@@ -143,7 +143,7 @@ describe("background lifecycle across MCP restarts", () => {
         `spawn(process.execPath, ['-e', ${JSON.stringify(`setTimeout(() => require('node:fs').writeFileSync(${JSON.stringify(marker)}, 'completed'), 700)`) }], { stdio: 'ignore' }).unref();`,
         "setTimeout(() => {",
         "  console.log(JSON.stringify({ type: 'text', data: 'complete after restart' }));",
-        "  console.log(JSON.stringify({ type: 'end', sessionId: 's2', stopReason: 'EndTurn' }));",
+        "  console.log(JSON.stringify({ type: 'end', sessionId: 's2', stopReason: 'end_turn' }));",
         "}, 100);"
       ].join("\n")
     );

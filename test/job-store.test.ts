@@ -3,7 +3,7 @@ import { join } from "node:path";
 import { describe, expect, it } from "vitest";
 import { JobStore, summarizeGrokOutput } from "../plugins/grok-plugin-codex/src/job-store.js";
 import type { JobRecord } from "../plugins/grok-plugin-codex/src/types.js";
-import { tempDir } from "./helpers.js";
+import { STOP_REASON_SPELLINGS, tempDir } from "./helpers.js";
 
 function record(status: JobRecord["status"]): JobRecord {
   return {
@@ -19,26 +19,30 @@ function record(status: JobRecord["status"]): JobRecord {
 }
 
 describe("Grok job output summary", () => {
-  it("ignores warning lines, concatenates text events, and requires an end event", () => {
-    const stdout = [
-      "2026 WARN non-json line",
-      "{\"type\":\"thought\",\"data\":\"thinking\"}",
-      "{\"type\":\"text\",\"data\":\"Hello\"}",
-      "{\"type\":\"text\",\"data\":\" world\"}",
-      "{\"type\":\"end\",\"stopReason\":\"EndTurn\",\"sessionId\":\"s1\",\"requestId\":\"r1\"}"
-    ].join("\n");
+  it.each(STOP_REASON_SPELLINGS.endTurn)(
+    "ignores warning lines, concatenates text events, and requires an end event (%s)",
+    (stopReason) => {
+      const stdout = [
+        "2026 WARN non-json line",
+        "{\"type\":\"thought\",\"data\":\"thinking\"}",
+        "{\"type\":\"text\",\"data\":\"Hello\"}",
+        "{\"type\":\"text\",\"data\":\" world\"}",
+        `{"type":"end","stopReason":"${stopReason}","sessionId":"s1","requestId":"r1"}`
+      ].join("\n");
 
-    const summary = summarizeGrokOutput(record("succeeded"), stdout);
+      const summary = summarizeGrokOutput(record("succeeded"), stdout);
 
-    expect(summary.resultComplete).toBe(true);
-    expect(summary.state).toBe("succeeded_with_text");
-    expect(summary.eventCounts).toEqual({ thought: 1, text: 2, end: 1 });
-    expect(summary.finalText).toBe("Hello world");
-    expect(summary.textPreview).toBe("Hello world");
-    expect(summary.grokSessionId).toBe("s1");
-    expect(summary.requestId).toBe("r1");
-    expect(summary.stopReason).toBe("EndTurn");
-  });
+      expect(summary.resultComplete).toBe(true);
+      expect(summary.state).toBe("succeeded_with_text");
+      expect(summary.eventCounts).toEqual({ thought: 1, text: 2, end: 1 });
+      expect(summary.finalText).toBe("Hello world");
+      expect(summary.textPreview).toBe("Hello world");
+      expect(summary.grokSessionId).toBe("s1");
+      expect(summary.requestId).toBe("r1");
+      expect(summary.stopReason).toBe(stopReason);
+      expect(summary.stopReasonNormalized).toBe("endturn");
+    }
+  );
 
   it("marks succeeded output without an end event as incomplete", () => {
     const summary = summarizeGrokOutput(record("succeeded"), "{\"type\":\"text\",\"data\":\"partial\"}");
@@ -48,26 +52,30 @@ describe("Grok job output summary", () => {
     expect(summary.sawEnd).toBe(false);
   });
 
-  it("treats a Cancelled end event as partial even when text was emitted", () => {
-    const stdout = [
-      '{"type":"text","data":"I will review the diff."}',
-      '{"type":"end","stopReason":"Cancelled","sessionId":"cancelled-session","requestId":"cancelled-request"}'
-    ].join("\n");
+  it.each(STOP_REASON_SPELLINGS.cancelled)(
+    "treats a %s end event as partial even when text was emitted",
+    (stopReason) => {
+      const stdout = [
+        '{"type":"text","data":"I will review the diff."}',
+        `{"type":"end","stopReason":"${stopReason}","sessionId":"cancelled-session","requestId":"cancelled-request"}`
+      ].join("\n");
 
-    const summary = summarizeGrokOutput(record("succeeded"), stdout);
+      const summary = summarizeGrokOutput(record("succeeded"), stdout);
 
-    expect(summary.resultComplete).toBe(false);
-    expect(summary.state).toBe("cancelled_partial");
-    expect(summary.finalText).toBe("I will review the diff.");
-    expect(summary.stopReason).toBe("Cancelled");
-    expect(summary.guidance).toContain("cancelled");
-  });
+      expect(summary.resultComplete).toBe(false);
+      expect(summary.state).toBe("cancelled_partial");
+      expect(summary.finalText).toBe("I will review the diff.");
+      expect(summary.stopReason).toBe(stopReason);
+      expect(summary.stopReasonNormalized).toBe("cancelled");
+      expect(summary.guidance).toContain("cancelled");
+    }
+  );
 
   it("classifies max_turns_reached streaming output as a typed partial failure", () => {
     const stdout = [
       '{"type":"thought","data":"finding a problem"}',
       '{"type":"max_turns_reached"}',
-      '{"type":"end","stopReason":"Cancelled","sessionId":"max-turns-session"}'
+      '{"type":"end","stopReason":"cancelled","sessionId":"max-turns-session"}'
     ].join("\n");
 
     const summary = summarizeGrokOutput(record("failed"), stdout, "Error: max turns reached");
@@ -101,7 +109,7 @@ describe("Grok job output summary", () => {
     const dir = await tempDir();
     const store = new JobStore(dir);
     await store.write(record("succeeded"));
-    await writeFile(store.stdoutPath("job_1700000000000_abcdef12"), "{\"type\":\"text\",\"data\":\"OK\"}\n{\"type\":\"end\",\"stopReason\":\"EndTurn\",\"sessionId\":\"s1\"}\n");
+    await writeFile(store.stdoutPath("job_1700000000000_abcdef12"), "{\"type\":\"text\",\"data\":\"OK\"}\n{\"type\":\"end\",\"stopReason\":\"end_turn\",\"sessionId\":\"s1\"}\n");
     await writeFile(store.stderrPath("job_1700000000000_abcdef12"), "");
 
     const result = await store.result("job_1700000000000_abcdef12");

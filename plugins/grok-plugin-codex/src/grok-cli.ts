@@ -3,6 +3,7 @@ import { access } from "node:fs/promises";
 import { delimiter, join } from "node:path";
 import { homedir } from "node:os";
 import { spawn, type ChildProcess } from "node:child_process";
+import { normalizeStopReason } from "./result-parser.js";
 import type { GrokModelsSummary, ProcessResult } from "./types.js";
 
 export type DiscoverGrokOptions = {
@@ -257,6 +258,90 @@ export async function probeGrokCapabilities(
     },
     rawHelp,
     exitCode: result.exitCode
+  };
+}
+
+export type GrokInvocationProbe = {
+  modelInvocationTested: boolean;
+  callable: boolean;
+  observedStopReason?: string;
+  observedStopReasonNormalized?: string;
+  observedEventTypes: string[];
+  exitCode: number | null;
+  failureReason?: string;
+};
+
+export const INVOCATION_PROBE_PROMPT = "Reply with exactly: OK";
+export const INVOCATION_PROBE_TIMEOUT_MS = 30_000;
+
+/**
+ * One deliberately tiny live call that proves the stream vocabulary, not just the flag names.
+ * It spends real quota, so every caller must opt in explicitly (`probeInvocation: true`).
+ */
+export async function probeGrokInvocation(
+  bin: string,
+  options: { cwd: string; model?: string; timeoutMs?: number; env?: NodeJS.ProcessEnv; promptFile: string }
+): Promise<GrokInvocationProbe> {
+  const args = [
+    "--cwd",
+    options.cwd,
+    ...(options.model ? ["-m", options.model] : []),
+    "--output-format",
+    "streaming-json",
+    "--permission-mode",
+    "plan",
+    "--no-subagents",
+    "--max-turns",
+    "1",
+    "--prompt-file",
+    options.promptFile
+  ];
+  const result = await runProcess(bin, args, {
+    cwd: options.cwd,
+    env: options.env,
+    timeoutMs: Math.min(options.timeoutMs ?? INVOCATION_PROBE_TIMEOUT_MS, INVOCATION_PROBE_TIMEOUT_MS)
+  });
+
+  const observedEventTypes: string[] = [];
+  let observedStopReason: string | undefined;
+  let sawText = false;
+  for (const line of result.stdout.split(/\r?\n/)) {
+    if (!line.trim()) continue;
+    let parsed: unknown;
+    try {
+      parsed = JSON.parse(line);
+    } catch {
+      continue;
+    }
+    if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) continue;
+    const event = parsed as Record<string, unknown>;
+    const type = typeof event.type === "string" ? event.type : "unknown";
+    if (!observedEventTypes.includes(type)) observedEventTypes.push(type);
+    if (type === "text") sawText = true;
+    if (type === "end" && typeof event.stopReason === "string") observedStopReason = event.stopReason;
+  }
+
+  const observedStopReasonNormalized = normalizeStopReason(observedStopReason);
+  const sawNormalEnd = observedEventTypes.includes("end") && observedStopReasonNormalized === "endturn";
+  const callable = result.exitCode === 0 && !result.timedOut && sawText && sawNormalEnd;
+  const failureReason = callable
+    ? undefined
+    : result.timedOut
+      ? "The invocation probe exceeded its 30s budget."
+      : result.exitCode !== 0
+        ? `The invocation probe exited ${result.exitCode}.`
+        : !sawText
+          ? "The invocation probe produced no text event."
+          : `The invocation probe ended with stopReason "${observedStopReason ?? "(absent)"}" instead of a normal end turn.`;
+
+  return {
+    modelInvocationTested: true,
+    callable,
+    observedStopReason,
+    observedStopReasonNormalized: observedStopReason === undefined ? undefined : observedStopReasonNormalized,
+    observedEventTypes,
+    exitCode: result.exitCode,
+    failureReason
   };
 }
 
