@@ -2,7 +2,7 @@
 
 `grok-plugin-codex` exposes a locally installed Grok CLI to Codex through a bundled Node/TypeScript MCP server. Codex remains responsible for scope, workspace state, verification, git, and final judgment; Grok is a bounded second surface.
 
-Version `0.3.0` is the current release. It normalises the Grok stop-reason vocabulary (`end_turn` and `EndTurn` are one fact), classifies timeouts and quota exhaustion correctly, defaults dispatch tools to background with per-kind time budgets, returns a recovery handle on every non-complete result, refuses to report a verdict reached without a single tool call as a completed review, and adds `grok_finalize` — the one-turn, tool-free way to recover an answer that already exists. See [CHANGELOG.md](CHANGELOG.md) for the full contract changes. Version 0.2 introduced the private central worker architecture and typed MCP envelopes.
+Version `0.3.1` is the current release. It treats an explicit absolute `cwd` as a per-call grant to the exact canonical workspace while preserving validation and operation-level permissions. See [CHANGELOG.md](CHANGELOG.md) for the full contract changes. Version 0.3 introduced recovery/finality controls and the private central worker architecture.
 
 Repository: https://github.com/handong66/grok-plugin-codex
 Write-up: https://han-dong.link/en/work/grok-plugin-codex
@@ -77,7 +77,7 @@ Input schema violations are SDK-generated tool errors (`isError: true`) without 
 
 ## Workspace and prompt boundaries
 
-Workspace operations require `cwd`. The server canonicalizes symlinks and requires the resolved directory to remain inside an active MCP workspace root. Private Codex paths such as `~/.codex` are blocked unless the user explicitly authorizes that risk.
+Workspace operations require an absolute `cwd`. Supplying it grants only that tool call access to the exact canonical directory, regardless of whether the MCP client advertises the same root, another root, or no roots. The grant is not cached for later calls. The server resolves symlinks, rejects missing and non-directory paths, and blocks private Codex paths such as `~/.codex` unless the user explicitly authorizes that risk. This workspace grant does not enable `--always-approve`; mutable operation approval remains separately opt-in, and review/rescue tools remain read-only.
 
 Prompts are staged briefly in private `0600` files so a detached worker can survive MCP-server exit. The worker reads and deletes the staging file before Grok runs, then supplies the prompt through a `0600` FIFO inside a random `0700` directory. Grok receives only that private pathname through native `--prompt-file`; the launcher unlinks it as soon as Grok opens it, before writing any prompt bytes. Prompt text is not placed in the child-process argument list or job record. `GROK_BIN` is the only supported custom executable configuration and must come from the trusted MCP environment.
 

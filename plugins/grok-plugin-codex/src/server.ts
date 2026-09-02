@@ -71,8 +71,11 @@ const outputSchema = {
   warnings: z.array(z.string())
 };
 
-const cwdRequired = z.string().trim().min(1).max(4_096).describe("Existing working directory inside an active MCP workspace root.");
-const cwdOptional = z.string().trim().min(1).max(4_096).optional();
+const cwdDescription =
+  "Existing absolute working directory. Supplying cwd grants this tool call access to that exact " +
+  "canonical directory; the grant is not remembered for later calls.";
+const cwdRequired = z.string().trim().min(1).max(4_096).describe(cwdDescription);
+const cwdOptional = z.string().trim().min(1).max(4_096).optional().describe(cwdDescription);
 const timeoutSchema = z
   .number()
   .int()
@@ -146,8 +149,8 @@ server.registerTool(
       "A failed discovery call reports retryable from the failure classifier, so auth and quota stops are " +
       "not advertised as retryable. " +
       "modelInvocationTested and callable stay false/null unless probeInvocation is explicitly requested. " +
-      "With a cwd given but no workspace roots this tool degrades to an unbounded diagnostic run with a " +
-      "warning, so diagnostics stay reachable exactly when the workspace metadata is missing.",
+      "An explicit absolute cwd is a per-call grant to its canonical directory, even when the client " +
+      "advertises no workspace roots; the grant is not remembered and private Codex paths stay blocked.",
     inputSchema: {
       cwd: cwdOptional,
       includeModels: z.boolean().optional(),

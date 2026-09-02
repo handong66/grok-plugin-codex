@@ -1,6 +1,6 @@
 #!/usr/bin/env node
 import { existsSync } from "node:fs";
-import { mkdtemp, rm } from "node:fs/promises";
+import { chmod, mkdtemp, rm, writeFile } from "node:fs/promises";
 import { homedir } from "node:os";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -151,11 +151,23 @@ function localGrokCandidate() {
 }
 
 const stateDir = await mkdtemp(join(tmpdir(), "grok-plugin-codex-smoke-state-"));
+const workspaceDir = await mkdtemp(join(tmpdir(), "grok-plugin-codex-smoke-workspace-"));
+const fakeGrok = join(workspaceDir, "grok");
+await writeFile(
+  fakeGrok,
+  `#!/bin/sh
+if [ "$1" = "--version" ]; then echo "grok fake 1.0.0"; exit 0; fi
+if [ "$1" = "--help" ]; then echo "--prompt-file streaming-json --permission-mode plan --no-subagents"; exit 0; fi
+for arg in "$@"; do printf '%s\\n' "$arg"; done
+`,
+  { mode: 0o700 }
+);
+await chmod(fakeGrok, 0o700);
 const transport = new StdioClientTransport({
   command: "node",
   args: ["plugins/grok-plugin-codex/dist/server.js"],
   cwd: process.cwd(),
-  env: { ...process.env, GROK_PLUGIN_STATE_DIR: stateDir },
+  env: { ...process.env, GROK_BIN: fakeGrok, GROK_PLUGIN_STATE_DIR: stateDir },
   stderr: "pipe"
 });
 
@@ -236,6 +248,18 @@ try {
     throw new Error("Business error text does not mirror structuredContent.");
   }
 
+  // An MCP client that implements no roots/list handler reproduces the Codex turn where no roots
+  // are advertised. The explicit absolute cwd must still authorize exactly this call.
+  const workspaceCall = await client.callTool(
+    { name: "grok_sessions", arguments: { cwd: workspaceDir, limit: 1 } },
+    undefined,
+    { timeout: 5_000 }
+  );
+  const workspaceEnvelope = JSON.parse(workspaceCall.content?.[0]?.text ?? "{}");
+  if (workspaceCall.isError || !workspaceEnvelope.ok || !workspaceEnvelope.data?.stdout?.includes(workspaceDir)) {
+    throw new Error(`Explicit cwd was not honored without MCP roots: ${JSON.stringify(workspaceCall)}`);
+  }
+
   if (localGrokCandidate()) {
     const result = await client.callTool(
       {
@@ -255,5 +279,6 @@ try {
 } finally {
   await client.close();
   await rm(stateDir, { recursive: true, force: true });
+  await rm(workspaceDir, { recursive: true, force: true });
   if (stderr.trim()) process.stderr.write(stderr);
 }

@@ -1,4 +1,4 @@
-import { mkdir, readFile, writeFile } from "node:fs/promises";
+import { mkdir, readFile, symlink, writeFile } from "node:fs/promises";
 import { join } from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
 import {
@@ -51,25 +51,84 @@ describe("GK6 private_path_blocked", () => {
   });
 });
 
-describe("GK7 workspace_unavailable", () => {
-  it("is retryable and says the roots arrive per turn", async () => {
+describe("explicit cwd capability grant", () => {
+  it("authorizes an existing absolute cwd when the client supplies no roots", async () => {
     configureWorkspaceRootsProvider(async () => []);
     const workspace = await tempDir();
+    const stateDir = await tempDir();
+    const grokBin = await makeExecutable(join(workspace, "grok"), fakeGrok());
+
+    const parsed = envelope(await withEnv(
+      { GROK_BIN: grokBin, GROK_PLUGIN_STATE_DIR: stateDir },
+      () => grokRun({ cwd: workspace, background: false, timeoutMs: 30_000, prompt: "hello" })
+    ));
+
+    expect(parsed.ok).toBe(true);
+    expect(parsed.data.outputSummary.resultComplete).toBe(true);
+  });
+
+  it("authorizes an explicit cwd outside an unrelated active root", async () => {
+    const activeRoot = await tempDir();
+    const workspace = await tempDir();
+    const stateDir = await tempDir();
+    const grokBin = await makeExecutable(join(workspace, "grok"), fakeGrok());
+    configureWorkspaceRootsProvider(async () => [activeRoot]);
+
+    const parsed = envelope(await withEnv(
+      { GROK_BIN: grokBin, GROK_PLUGIN_STATE_DIR: stateDir },
+      () => grokRun({ cwd: workspace, background: false, timeoutMs: 30_000, prompt: "hello" })
+    ));
+
+    expect(parsed.ok).toBe(true);
+    expect(parsed.data.outputSummary.resultComplete).toBe(true);
+  });
+
+  it("rejects a relative cwd instead of resolving it against the MCP process", async () => {
+    configureWorkspaceRootsProvider(async () => []);
 
     const parsed = envelope(
-      await grokRun({ cwd: workspace, background: false, timeoutMs: 30_000, prompt: "hello" })
+      await grokRun({ cwd: ".", background: false, timeoutMs: 30_000, prompt: "hello" })
     );
 
     expect(parsed.ok).toBe(false);
-    expect(parsed.error.code).toBe("workspace_unavailable");
-    expect(parsed.error.retryable).toBe(true);
-    expect(parsed.error.message).toMatch(/retry/i);
-    expect(parsed.error.details.listRootsCount).toBe(0);
-    expect(parsed.error.details.codexMetaRootsCount).toBe(0);
-    expect(parsed.error.details.requestedCwd).toBe(workspace);
+    expect(parsed.error.code).toBe("workspace_invalid");
+    expect(parsed.error.retryable).toBe(false);
   });
 
-  it("reuses the last non-empty root set for a turn that carries no metadata", async () => {
+  it("does not let the cwd grant bypass private Codex paths directly or through a symlink", async () => {
+    configureWorkspaceRootsProvider(async () => []);
+    const codexHome = await tempDir();
+    const linkParent = await tempDir();
+    const linkedCodexHome = join(linkParent, "codex-home-link");
+    await symlink(codexHome, linkedCodexHome);
+
+    const direct = envelope(await withEnv(
+      { CODEX_HOME: codexHome },
+      () => grokRun({ cwd: codexHome, background: false, timeoutMs: 30_000, prompt: "hello" })
+    ));
+    const linked = envelope(await withEnv(
+      { CODEX_HOME: codexHome },
+      () => grokRun({ cwd: linkedCodexHome, background: false, timeoutMs: 30_000, prompt: "hello" })
+    ));
+    const stateDir = await tempDir();
+    const grokBin = await makeExecutable(join(codexHome, "grok"), fakeGrok());
+    const explicitlyAllowed = envelope(await withEnv(
+      { CODEX_HOME: codexHome, GROK_BIN: grokBin, GROK_PLUGIN_STATE_DIR: stateDir },
+      () => grokRun({
+        cwd: codexHome,
+        allowCodexPrivatePaths: true,
+        background: false,
+        timeoutMs: 30_000,
+        prompt: "hello"
+      })
+    ));
+
+    expect(direct.error.code).toBe("private_path_blocked");
+    expect(linked.error.code).toBe("private_path_blocked");
+    expect(explicitlyAllowed.ok).toBe(true);
+  });
+
+  it("keeps remembered roots only for state-directory isolation", async () => {
     configureWorkspaceRootsProvider(async () => []);
     const workspace = await tempDir();
     const stateDir = await tempDir();
@@ -95,7 +154,27 @@ describe("GK7 workspace_unavailable", () => {
 
     expect(first.ok).toBe(true);
     expect(second.ok).toBe(true);
-    expect((second.warnings as string[]).join("\n")).toMatch(/earlier turn/i);
+  });
+
+  it("does not remember a caller-granted cwd for a later call", async () => {
+    configureWorkspaceRootsProvider(async () => []);
+    const firstWorkspace = await tempDir();
+    const secondWorkspace = await tempDir();
+    const firstState = await tempDir();
+    const firstGrok = await makeExecutable(join(firstWorkspace, "grok"), fakeGrok());
+    const secondGrok = await makeExecutable(join(secondWorkspace, "grok"), fakeGrok());
+
+    const first = envelope(await withEnv(
+      { GROK_BIN: firstGrok, GROK_PLUGIN_STATE_DIR: firstState },
+      () => grokRun({ cwd: firstWorkspace, background: false, timeoutMs: 30_000, prompt: "first" })
+    ));
+    const second = envelope(await withEnv(
+      { GROK_BIN: secondGrok, GROK_PLUGIN_STATE_DIR: join(firstWorkspace, "state") },
+      () => grokRun({ cwd: secondWorkspace, background: false, timeoutMs: 30_000, prompt: "second" })
+    ));
+
+    expect(first.ok).toBe(true);
+    expect(second.ok).toBe(true);
   });
 });
 
@@ -195,7 +274,7 @@ describe("GPC-10 diagnostics stay reachable", () => {
 
     expect(parsed.ok).toBe(true);
     expect(parsed.data.cliDiscovered).toBe(true);
-    expect((parsed.warnings as string[]).join("\n")).toContain("no workspace roots");
+    expect(parsed.warnings).toEqual([]);
     // GPC-10.2: no literal — the reported version is whatever package.json says.
     const packageVersion = JSON.parse(await readFile("package.json", "utf8")).version;
     expect(parsed.data.pluginVersion).toBe(packageVersion);

@@ -695,15 +695,25 @@ printf '%s\n' '{"type":"text","data":"diagnosis"}' '{"type":"end","stopReason":"
     expect(parsed.data.stdout).toContain("sessions\nsearch\n--\n--help\n");
   });
 
-  it("rejects a cwd symlink that resolves outside the active workspace root", async () => {
+  it("canonicalizes an explicitly granted cwd symlink outside the active workspace root", async () => {
     const root = await tempDir();
     const outside = await tempDir();
+    const canonicalOutside = await realpath(outside);
+    const grokBin = await makeExecutable(join(outside, "grok"), `#!/bin/sh
+if [ "$1" = "--version" ]; then echo "grok fake 1.0.0"; exit 0; fi
+if [ "$1" = "--cwd" ] && [ "$2" = ${JSON.stringify(canonicalOutside)} ] && [ "$3" = "models" ]; then
+  echo "Default model: grok-build"
+  exit 0
+fi
+exit 9
+`);
     const link = join(root, "outside-link");
     await symlink(outside, link);
 
-    const parsed = envelope(await grokModels({ cwd: link, ...roots(root) }));
+    const parsed = envelope(await withEnv({ GROK_BIN: grokBin }, () => grokModels({ cwd: link, ...roots(root) })));
 
-    expect(parsed.error.code).toBe("workspace_outside_roots");
+    expect(parsed.ok).toBe(true);
+    expect(parsed.data.parsed.defaultModel).toBe("grok-build");
   });
 
   it("rejects a configured state directory inside the active workspace", async () => {

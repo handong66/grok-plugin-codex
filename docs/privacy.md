@@ -8,6 +8,10 @@ Effective date: July 10, 2026
 
 The plugin starts a local Node.js MCP server. Foreground and background requests both use a detached local worker so execution and cleanup can survive MCP-server exit. The Grok CLI may send prompt and workspace-derived content to Grok/xAI according to the user's CLI configuration and xAI terms. This project does not control that processing.
 
+An explicit absolute `cwd` authorizes one tool call to operate in that canonical directory. It is not
+remembered as authorization for later calls. This admission does not enable Grok's
+`--always-approve`; operation approval remains a separate explicit choice.
+
 ## Prompt handling
 
 Prompt text is staged briefly in a private `0600` file so the detached worker can acquire it. The worker reads and removes that file before starting Grok, then sends the prompt to its private launcher through inherited file descriptor 3. The launcher creates a `0600` FIFO inside a random `0700` directory and passes only that private pathname to Grok with `--prompt-file`. A non-blocking writer open succeeds only after Grok has opened the FIFO for reading; the launcher then unlinks the FIFO and directory before writing any prompt bytes through the already-open descriptor. Prompt text is not placed in process arguments or persisted job arguments, and no prompt pathname remains while Grok processes the request. A crash before worker acquisition is reconciled by job status/result or the next opportunistic cleanup.

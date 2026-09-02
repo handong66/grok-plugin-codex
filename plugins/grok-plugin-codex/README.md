@@ -1,12 +1,12 @@
 # Grok for Codex
 
-`grok-plugin-codex` is the macOS/Linux Codex capability adapter for a locally installed Grok CLI. Version 0.3.0 normalises the Grok stop-reason vocabulary, adds per-kind time budgets and background-by-default dispatch, returns a recovery handle on every non-complete result, adds `grok_finalize`, and refuses to report a verdict reached without a single tool call as a completed review.
+`grok-plugin-codex` is the macOS/Linux Codex capability adapter for a locally installed Grok CLI. Version 0.3.1 makes an explicit absolute `cwd` a per-call workspace grant while retaining path validation, state isolation, and the existing operation-permission controls.
 
 ## Runtime contract
 
 - Configure a nonstandard executable with the trusted MCP environment variable `GROK_BIN`.
 - `grok_check` reports CLI discovery, authentication, entitlement, model listing, and actual model-call evidence separately. Listing a model is not proof that it can complete a request. `authenticated` and `entitled` are `true`, `false`, or the string `"unknown"`, never `null`.
-- Workspace operations require an explicit `cwd` inside an active MCP workspace root. Symlinks are resolved before the boundary check.
+- Workspace operations require an explicit absolute `cwd`. Supplying it grants that call the exact canonical directory, even when Codex advertises a different root or no roots; the grant is not remembered. Symlinks are resolved, missing/non-directory paths are rejected, and private Codex paths remain blocked by default.
 - `grok_review`, `grok_adversarial_review`, and `grok_rescue` run with Grok plan permissions and no subagents, which refuses shell execution: inline the diff, test log, or command output the review needs into the target. A run cancelled because a shell command needed approval comes back as `permission_denied_headless`, and refusals are listed in `outputSummary.deniedToolCalls`.
 - `target` (or `problem`) also accepts the sibling opencode plugin's name, `prompt` — exactly one of the two. `grok_adversarial_review` takes an optional `threatModel`; findings outside it are advisory and may not block.
 - `grok_finalize` is the one-call recovery: one turn, no tools, complete answer, anything unverified marked `UNVERIFIED`.

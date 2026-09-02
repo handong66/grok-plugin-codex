@@ -45,10 +45,9 @@ export type CommonArgs = {
 type WorkspaceRootsProvider = () => Promise<string[]>;
 let workspaceRootsProvider: WorkspaceRootsProvider = async () => [process.cwd()];
 /**
- * GK7: Codex supplies workspace roots per turn, and a turn that omits them made every workspace tool
- * fail with a non-retryable `workspace_unavailable` — recorded once, immediately followed by the same
- * call succeeding, and by the caller giving up on the plugin and running the CLI directly. The last
- * non-empty set is remembered in-process and used only when the current turn supplies nothing at all.
+ * Active roots are remembered only for the state-directory isolation check. They are not the
+ * authorization source for a call: an explicit absolute `cwd` is the caller's per-call capability
+ * grant, and must never be added to this cache or inherited by a later call.
  */
 let lastKnownWorkspaceRoots: string[] = [];
 
@@ -320,46 +319,22 @@ async function canonicalWorkspaceRoots(
 
 async function resolveWorkspaceCwd(
   cwd: string,
-  requestRoots: string[] = [],
-  allowCodexPrivatePaths = false,
-  onWarning?: (warning: string) => void
+  allowCodexPrivatePaths = false
 ): Promise<string> {
-  const counts = { listRoots: 0, codexMeta: 0 };
-  const roots = await canonicalWorkspaceRoots(requestRoots, {
-    allowRemembered: true,
-    counts,
-    onRemembered: () =>
-      onWarning?.(
-        "This turn carried no workspace roots, so the boundary check reused the root set this MCP " +
-          "server was given on an earlier turn. Pass the workspace metadata again if the workspace changed."
-      )
-  });
-  if (!roots.length) {
+  if (!isAbsolute(cwd)) {
     throw new GrokPluginError(
-      "workspace_unavailable",
-      "This turn carried no workspace roots. Codex supplies them per turn, so this is usually a timing " +
-        "gap rather than a configuration error: retry the same call. If it keeps happening, restart the " +
-        "MCP server.",
-      true,
-      {
-        listRootsSupported: true,
-        listRootsCount: counts.listRoots,
-        codexMetaRootsCount: counts.codexMeta,
-        requestedCwd: cwd
-      }
+      "workspace_invalid",
+      "The requested working directory must be an absolute path."
     );
   }
   let candidate: string;
   try {
-    candidate = await realpath(resolve(cwd));
+    candidate = await realpath(cwd);
   } catch {
     throw new GrokPluginError("workspace_not_found", "The requested working directory does not exist.");
   }
   if (!(await stat(candidate)).isDirectory()) {
     throw new GrokPluginError("workspace_invalid", "The requested working directory is not a directory.");
-  }
-  if (!roots.some((root) => isWithin(root, candidate))) {
-    throw new GrokPluginError("workspace_outside_roots", "The requested working directory is outside the active MCP workspace roots.");
   }
   if (!allowCodexPrivatePaths) {
     const codexHome = await realpath(process.env.CODEX_HOME ?? join(homedir(), ".codex")).catch(() => null);
@@ -376,38 +351,15 @@ async function resolveWorkspaceCwd(
 }
 
 /**
- * GPC-10.1: diagnostics must stay reachable exactly when the workspace metadata is missing — that is
- * the moment a caller needs to know whether the CLI works at all. Execution and session tools keep
- * failing closed; only `grok_check` / `grok_models` degrade, and they say so in a warning.
+ * Diagnostics accept the same explicit cwd capability grant as execution tools. When cwd is omitted,
+ * discovery uses an active root if one exists and otherwise the MCP process directory.
  */
 async function resolveDiscoveryCwd(
   cwd?: string,
-  requestRoots: string[] = [],
-  onWarning?: (warning: string) => void
+  requestRoots: string[] = []
 ): Promise<string> {
   if (cwd) {
-    try {
-      return await resolveWorkspaceCwd(cwd, requestRoots, false, onWarning);
-    } catch (error) {
-      if (!(error instanceof GrokPluginError) || error.code !== "workspace_unavailable") throw error;
-      onWarning?.(
-        "The MCP client supplied no workspace roots; diagnostics ran without a workspace boundary check."
-      );
-      // X13: only the *boundary* check degrades. This used to fall back to `homedir()` whenever the
-      // named directory could not be resolved, so a typo'd or deleted `cwd` silently ran the
-      // diagnostics — including the opt-in, quota-spending invocation probe — somewhere the caller
-      // never named, and reported success for it. A path that does not resolve is still an error.
-      let candidate: string;
-      try {
-        candidate = await realpath(resolve(cwd));
-      } catch {
-        throw new GrokPluginError("workspace_not_found", "The requested working directory does not exist.");
-      }
-      if (!(await stat(candidate)).isDirectory()) {
-        throw new GrokPluginError("workspace_invalid", "The requested working directory is not a directory.");
-      }
-      return candidate;
-    }
+    return await resolveWorkspaceCwd(cwd);
   }
 
   const roots = await canonicalWorkspaceRoots(requestRoots);
@@ -674,9 +626,7 @@ async function runOrStartJob(params: CommonArgs & {
     const inheritedWarnings: string[] = [];
     const cwd = await resolveWorkspaceCwd(
       params.cwd,
-      params._workspaceRoots,
-      params.allowCodexPrivatePaths,
-      (warning) => inheritedWarnings.push(warning)
+      params.allowCodexPrivatePaths
     );
     validatePromptBoundary(params.prompt, params.allowCodexPrivatePaths);
     let readOnly = params.readOnly ?? false;
@@ -1078,7 +1028,7 @@ export async function grokCheck(args: {
     if (args.includeModels === false && !args.probeInvocation) return success(base);
 
     const warnings: string[] = [];
-    const cwd = await resolveDiscoveryCwd(args.cwd, args._workspaceRoots, (warning) => warnings.push(warning));
+    const cwd = await resolveDiscoveryCwd(args.cwd, args._workspaceRoots);
     warnings.push(...(await legacyWorkspaceDirWarnings(cwd)));
     let invocation: GrokInvocationProbe | undefined;
     if (args.probeInvocation) {
@@ -1158,7 +1108,7 @@ export async function grokCheck(args: {
 export async function grokModels(args: { cwd?: string; timeoutMs?: number; _workspaceRoots?: string[] }) {
   return await guarded(async () => {
     const warnings: string[] = [];
-    const cwd = await resolveDiscoveryCwd(args.cwd, args._workspaceRoots, (warning) => warnings.push(warning));
+    const cwd = await resolveDiscoveryCwd(args.cwd, args._workspaceRoots);
     const result = await runGrok(withGlobalCwd(cwd, ["models"]), {
       cwd,
       timeoutMs: args.timeoutMs ?? DEFAULT_DISCOVERY_TIMEOUT_MS
@@ -1450,7 +1400,7 @@ export async function grokFinalize(args: {
 
 export async function grokSessions(args: { cwd: string; timeoutMs?: number; query?: string; limit?: number; _workspaceRoots?: string[] }) {
   return await guarded(async () => {
-    const cwd = await resolveWorkspaceCwd(args.cwd, args._workspaceRoots);
+    const cwd = await resolveWorkspaceCwd(args.cwd);
     const commandArgs = withGlobalCwd(cwd, ["sessions", args.query ? "search" : "list"]);
     if (args.limit !== undefined) commandArgs.push("--limit", String(args.limit));
     if (args.query) commandArgs.push("--", args.query);
@@ -1468,7 +1418,7 @@ export async function grokSessions(args: { cwd: string; timeoutMs?: number; quer
 
 export async function grokExport(args: { cwd: string; timeoutMs?: number; sessionId: string; _workspaceRoots?: string[] }) {
   return await guarded(async () => {
-    const cwd = await resolveWorkspaceCwd(args.cwd, args._workspaceRoots);
+    const cwd = await resolveWorkspaceCwd(args.cwd);
     validateSessionId(args.sessionId);
     const result = await runGrok(withGlobalCwd(cwd, ["export", "--", args.sessionId]), {
       cwd,

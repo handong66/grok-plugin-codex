@@ -45,6 +45,11 @@ npm run smoke:live-grok
 
 Adding, removing, or renaming a tool or argument must change the source schema and its contract test in the same patch. Dong-skills orchestration documentation must not duplicate the low-level schema.
 
+An explicit absolute `cwd` is a per-call workspace capability. Canonicalize and validate it, but do
+not require it to appear in MCP roots and never add it to `lastKnownWorkspaceRoots`. Advertised or
+remembered roots are used only to keep private state disjoint from every known workspace. Workspace
+admission and operation approval are separate: do not infer `alwaysApprove` from `cwd`.
+
 ## Command rules
 
 - Foreground and background prompts both use `streaming-json`; the worker removes the staging file before passing the prompt through native `--prompt-file` backed by a `0600` FIFO in a random `0700` directory. The launcher waits for Grok to open the FIFO, unlinks the path, and only then writes the prompt.

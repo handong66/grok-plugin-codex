@@ -1,13 +1,13 @@
 # Verification
 
-Offline gate, 0.3.0: verified 2026-08-16 — `npm run check` green on macOS 26.6.1 (darwin 25.6.0),
-Node v25.9.0. This records that the deterministic gate passed on one machine. It observed no Grok CLI
-and therefore says nothing about CLI compatibility.
+Offline gate, 0.3.1: verified 2026-09-01 — `npm run check` green on macOS. This records that the
+deterministic gate passed on one machine. It observed no Grok model invocation and therefore says
+nothing about model quota or provider availability.
 
-Live gate, 0.3.0: verified 2026-08-16 — `npm run smoke:live-grok` passed against
-Grok CLI 1.0.3 (1a29d5bc12d4) on darwin arm64 25.6.0, Node v25.9.0.
+Live gate, 0.3.1: **not run**. This workspace-authorization patch was verified without spending Grok
+model quota. A release build remains blocked until the authenticated live smoke is explicitly run.
 
-Previous dated record: 0.2.1 was verified on 2026-07-11 against Grok CLI 1.0.3 on macOS.
+Previous dated record: 0.3.0 was verified on 2026-08-16 against Grok CLI 1.0.3 on macOS.
 
 Every release must add both lines: a dated offline line, and a dated live line naming the CLI version
 it was verified against. An offline line never substitutes for the live one, and a record without a

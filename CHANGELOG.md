@@ -2,6 +2,16 @@
 
 All notable user-visible and contract changes to `grok-plugin-codex`.
 
+## 0.3.1 — 2026-09-01
+
+- Treat an explicit absolute `cwd` as a per-call capability grant for that canonical directory, even
+  when Codex advertises no MCP roots or advertises a different workspace. The grant is never cached
+  or inherited by later calls.
+- Reject relative `cwd` values instead of resolving them against the MCP server process directory.
+- Preserve symlink canonicalization, missing/non-directory checks, private Codex path blocking,
+  state-directory isolation, and read-only review permissions. Workspace admission does not imply
+  Grok `--always-approve`; that remains opt-in.
+
 ## 0.3.0 — 2026-08-16
 
 Contract changes in this release: `background` defaults to `true` for dispatch tools; `timeoutMs`
