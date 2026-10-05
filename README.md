@@ -1,14 +1,10 @@
 # Grok Plugin Codex
 
 <!-- archived-notice -->
-> [!WARNING]
-> **Archived on 2026-10-05 and no longer maintained.** The successor is **[Turnweft](https://github.com/handong66/turnweft)**: one runtime that lets Claude Code and Codex hand work to Grok, OpenCode, agy, Droid and Dim in your real project, with sessions you can resume later.
+> [!NOTE]
+> **Archived on 2026-10-05; no longer maintained.** The successor is **[Turnweft](https://github.com/handong66/turnweft)**, an open-source tool for working with Dim, Droid, Grok, OpenCode, and agy from Claude Code or Codex. Ask an agent to review code, make changes, or answer questions in your project, then continue the same agent session later.
 >
-> Turnweft is not yet a full replacement. It is an alpha release that runs on macOS only, and it does not include dedicated adversarial-review, finalize, or session-export tools. If you still need this plugin, the last version here keeps working as it is, but it will get no further fixes.
->
-> **已于 2026-10-05 归档，不再维护。** 后继项目是 **[Turnweft](https://github.com/handong66/turnweft)**：用一个运行时让 Claude Code 和 Codex 把任务交给 Grok、OpenCode、agy、Droid 和 Dim，在真实项目里执行，会话以后还能接着用。
->
-> Turnweft 目前还不能完全替代本插件：它是 alpha 版本，只支持 macOS，也没有专门的对抗式审查、收尾（finalize）和会话导出工具。如果仍需要本插件，可以继续使用这里的最后一个版本，但不会再有修复。
+> **已于 2026-10-05 归档，不再维护。** 后继项目是 **[Turnweft](https://github.com/handong66/turnweft)**，一个让你在 Claude Code 或 Codex 里与 Dim、Droid、Grok、OpenCode 和 agy 协作的开源工具。你可以请智能体在项目里审查代码、实现改动或回答问题，之后还能接着同一个智能体会话继续。
 
 <details>
 <summary>Move to Turnweft · 迁移到 Turnweft (Codex)</summary>
@@ -20,7 +16,11 @@ codex plugin remove grok-plugin-codex@grok-plugin-codex
 codex plugin marketplace remove grok-plugin-codex
 ```
 
-Install Turnweft (Node.js 22.13+) · 安装 Turnweft（需要 Node.js 22.13 或更高版本）:
+Install Turnweft · 安装 Turnweft
+
+Requires macOS, Node.js 22.13 or later, and the command-line tool for each agent you want to use, installed and signed in.
+
+需要 macOS、Node.js 22.13 或更高版本，以及已安装并登录的目标智能体命令行工具。
 
 ```bash
 npm install -g turnweft
@@ -28,9 +28,9 @@ codex plugin marketplace add handong66/turnweft
 codex plugin add turnweft@turnweft
 ```
 
-Then start a new conversation and ask in plain language, for example "Ask Grok to review my last commit. Read only." See the [Turnweft README](https://github.com/handong66/turnweft#readme) for details.
+Restart Codex and open a new conversation, then ask: "Ask Droid to explain what this project does, in five bullet points." See the [Turnweft README](https://github.com/handong66/turnweft#readme) for more examples.
 
-然后新开一个对话，直接用自然语言提出要求，例如"让 Grok 只读审查我最近一次提交"。详见 [Turnweft 中文说明](https://github.com/handong66/turnweft/blob/main/README.zh-CN.md)。
+重启 Codex 并新开一个对话，然后说："让 Droid 用五条要点说明这个项目是做什么的。"更多示例见 [Turnweft 中文说明](https://github.com/handong66/turnweft/blob/main/README.zh-CN.md)。
 
 </details>
 
